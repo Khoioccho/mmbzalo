@@ -71,6 +71,12 @@ class ZaloDriver:
 
     def _ensure_pw(self):
         if not self._pw:
+            import sys
+            import asyncio
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+                logger.info("Set WindowsProactorEventLoopPolicy for Playwright thread.")
+            
             self._pw = sync_playwright().start()
             logger.info("Playwright started (sync_api, threaded).")
 
@@ -122,8 +128,15 @@ class ZaloDriver:
 
         self._login_context = self._pw.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
+            channel="chrome",
             headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            args=[
+                "--disable-blink-features=AutomationControlled", 
+                "--no-sandbox",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
+                "--disable-site-isolation-trials"
+            ],
             viewport={"width": 1280, "height": 800},
             locale="vi-VN",
             user_agent=(
@@ -163,7 +176,6 @@ class ZaloDriver:
             if is_auth:
                 self._login_state = LoginState.AUTHENTICATED
                 self._extract_profile(self._login_page)
-                self._save_session()
                 logger.info(f"Login successful — profile: {self._profile_name}")
                 return self._status_dict("Authenticated successfully!")
             else:
@@ -203,30 +215,19 @@ class ZaloDriver:
 
     def _get_worker_context(self) -> BrowserContext:
         self._ensure_pw()
-        state_path = os.path.join(AUTH_STATE_DIR, "session.json")
-
-        if os.path.exists(state_path):
-            if not self._worker_browser or not self._worker_browser.is_connected():
-                self._worker_browser = self._pw.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                )
-            return self._worker_browser.new_context(
-                storage_state=state_path,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1440, "height": 900},
-                locale="vi-VN",
-            )
 
         if os.path.exists(USER_DATA_DIR):
             return self._pw.chromium.launch_persistent_context(
                 user_data_dir=USER_DATA_DIR,
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                channel="chrome",
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled", 
+                    "--no-sandbox",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
+                    "--disable-site-isolation-trials"
+                ],
                 viewport={"width": 1440, "height": 900},
                 locale="vi-VN",
                 user_agent=(
@@ -236,14 +237,16 @@ class ZaloDriver:
                 ),
             )
 
-        raise RuntimeError("No session available. Please log in first.")
+        raise RuntimeError("No session profile available. Please log in first.")
 
     def _worker_page(self) -> tuple:
         """Returns (context, page) with an authenticated Zalo session."""
         context = self._get_worker_context()
         page = context.pages[0] if hasattr(context, "pages") and context.pages else context.new_page()
-        page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=30_000)
-        time.sleep(3)
+        page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=60_000)
+        
+        # Give Zalo extra time to load in headless mode (it syncs data on load)
+        time.sleep(8)
 
         if not self._detect_auth(page):
             context.close()
@@ -271,42 +274,56 @@ class ZaloDriver:
                 except Exception:
                     continue
 
-            contacts_data = page.evaluate("""
-                () => {
-                    const results = []; const seen = new Set();
-                    const sels = ['div[data-id]','div[class*="conv-item"]','div[class*="ConversationItem"]',
-                                  'div[class*="friend-item"]','div[class*="contact-item"]',
-                                  '[role="listitem"]','[role="option"]'];
-                    for (const s of sels) {
-                        for (const el of document.querySelectorAll(s)) {
-                            const nameEl = el.querySelector('span,p,[class*="name"],[class*="truncate"]');
-                            const msgEl  = el.querySelector('[class*="msg"],[class*="last-msg"],[class*="subtitle"]');
-                            const imgEl  = el.querySelector('img');
-                            const badge  = el.querySelector('[class*="badge"],[class*="unread"]');
-                            const name = nameEl ? nameEl.textContent.trim() : '';
-                            if (name && !seen.has(name) && name.length < 100) {
-                                seen.add(name);
-                                results.push({ name, avatar_url: imgEl?.src||null,
-                                    last_message: msgEl?.textContent.trim()||null, unread: !!badge });
+            # We need to scroll to capture virtualized lists.
+            # Zalo unloads off-screen elements, so we collect, scroll, collect over a few iterations.
+            all_contacts = {}
+            
+            for _ in range(4): # 4 scroll iterations
+                contacts_data = page.evaluate("""
+                    () => {
+                        const results = [];
+                        const sels = ['div[data-id]','div[class*="conv-item"]','div[class*="ConversationItem"]',
+                                      'div[class*="friend-item"]','div[class*="contact-item"]',
+                                      '[role="listitem"]','[role="option"]'];
+                        for (const s of sels) {
+                            for (const el of document.querySelectorAll(s)) {
+                                const nameEl = el.querySelector('span,p,[class*="name"],[class*="truncate"]');
+                                const msgEl  = el.querySelector('[class*="msg"],[class*="last-msg"],[class*="subtitle"]');
+                                const imgEl  = el.querySelector('img');
+                                const badge  = el.querySelector('[class*="badge"],[class*="unread"]');
+                                const name = nameEl ? nameEl.textContent.trim() : '';
+                                if (name && name.length < 100) {
+                                    results.push({ name, avatar_url: imgEl?.src||null,
+                                        last_message: msgEl?.textContent.trim()||null, unread: !!badge });
+                                }
+                            }
+                            if (results.length > 0) break;
+                        }
+                        if (results.length === 0) {
+                            for (const el of document.querySelectorAll('div[tabindex="0"]')) {
+                                const text = el.textContent.trim(); const imgEl = el.querySelector('img');
+                                if (text && imgEl && text.length < 300) {
+                                    const name = text.split('\\n')[0].trim();
+                                    if (name) {
+                                        results.push({ name, avatar_url: imgEl.src, last_message: null, unread: false }); }
+                                }
                             }
                         }
-                        if (results.length > 0) break;
+                        // Try to scroll the virtual list container down
+                        const scrollable = document.querySelector('.ReactVirtualized__Grid, [class*="scroll"], [id*="scroll"], .ReactVirtualized__List');
+                        if (scrollable) scrollable.scrollTop += 800;
+                        
+                        return results;
                     }
-                    if (results.length === 0) {
-                        for (const el of document.querySelectorAll('div[tabindex="0"]')) {
-                            const text = el.textContent.trim(); const imgEl = el.querySelector('img');
-                            if (text && imgEl && text.length < 300) {
-                                const name = text.split('\\n')[0].trim();
-                                if (name && !seen.has(name)) { seen.add(name);
-                                    results.push({ name, avatar_url: imgEl.src, last_message: null, unread: false }); }
-                            }
-                        }
-                    }
-                    return results;
-                }
-            """)
+                """)
+                
+                # Aggregate to dict to remove duplicates by name
+                for c in contacts_data:
+                    all_contacts[c["name"]] = c
+                    
+                time.sleep(1) # wait for new virtual elements to render
 
-            contacts = [ContactInfo(**c) for c in contacts_data]
+            contacts = [ContactInfo(**c) for c in all_contacts.values()]
             return {"contacts": contacts, "contact_count": len(contacts),
                     "message": f"Synced {len(contacts)} contact(s)."}
         finally:
@@ -500,19 +517,6 @@ class ZaloDriver:
                 self._profile_avatar = img.get_attribute("src")
         except Exception:
             pass
-
-    def _save_session(self):
-        if not self._login_context:
-            return
-        try:
-            os.makedirs(AUTH_STATE_DIR, exist_ok=True)
-            path = os.path.join(AUTH_STATE_DIR, "session.json")
-            storage = self._login_context.storage_state()
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(storage, f, indent=2)
-            logger.info(f"Session saved to {path}")
-        except Exception as e:
-            logger.warning(f"Could not save session: {e}")
 
     def _open_search(self, page: Page) -> bool:
         for sel in ['input[placeholder*="T\\u00ECm ki\\u1EBFm"]', 'input[placeholder*="Search"]',
