@@ -1,0 +1,84 @@
+# MMBZalo — Phase 1 Prototype Walkthrough
+
+## What Was Built
+
+A fully working **Phase 1 prototype** from the PLANNING.md spec — focusing on **Authentication & Session Management** with contact parsing capabilities.
+
+### Architecture
+
+```mermaid
+graph LR
+    A["Dashboard<br/>(HTML/CSS/JS)"] -->|POST /api/validate| B["FastAPI Server<br/>(app/main.py)"]
+    A -->|POST /api/parse| B
+    B --> C["ZaloDriver<br/>(Playwright)"]
+    C -->|Cookie Injection| D["chat.zalo.me<br/>(Headless Chromium)"]
+    C -->|DOM Scraping| D
+    D -->|Session State| E["auth_state/<br/>session.json"]
+```
+
+---
+
+## Dashboard Preview
+
+![MMBZalo Dashboard](C:\Users\jimmy\.gemini\antigravity\brain\d0914f95-317d-4c2c-98f9-36b5514ea3f5\zalo_tester_dashboard_1777052519691.png)
+
+---
+
+## Files Created
+
+| File | Purpose |
+|------|---------|
+| [requirements.txt](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/requirements.txt) | Python dependencies (FastAPI, Playwright, etc.) |
+| [app/main.py](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/app/main.py) | FastAPI server with `/api/validate` and `/api/parse` endpoints |
+| [app/models.py](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/app/models.py) | Pydantic request/response schemas |
+| [app/zalo_driver.py](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/app/zalo_driver.py) | Core Playwright automation engine |
+| [frontend/index.html](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/frontend/index.html) | Dashboard HTML |
+| [frontend/styles.css](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/frontend/styles.css) | Dark glassmorphism theme |
+| [frontend/app.js](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/frontend/app.js) | Client-side logic and API calls |
+| [.gitignore](file:///c:/Users/jimmy/Documents/Random%20Project/mmbzalo/.gitignore) | Excludes auth state & Python artifacts |
+
+---
+
+## How to Test
+
+### Step 1: Get Your Cookies
+1. Open **Chrome** and log into [chat.zalo.me](https://chat.zalo.me)
+2. Open DevTools (`F12`) → **Console** tab
+3. Run this snippet:
+```js
+JSON.stringify(
+  document.cookie.split('; ').map(c => {
+    const [name, ...rest] = c.split('=');
+    return { name, value: rest.join('='), domain: '.zalo.me', path: '/' };
+  })
+);
+```
+4. Copy the output
+
+### Step 2: Test Authentication
+1. Go to `http://localhost:8000`
+2. Paste the JSON into the cookie textarea
+3. Click **Validate Session**
+4. The result will show ✓ (authenticated) or ✗ (failed)
+
+### Step 3: Parse Contacts
+1. With valid cookies pasted, click **Parse Contacts**
+2. The system will scrape your recent conversations from the sidebar
+3. Results appear in a table showing Name, Avatar, Last Message, and Unread status
+
+> [!TIP]
+> The "DevTools Snippet" tab in the dashboard shows the same console snippet for quick reference.
+
+---
+
+## Key Design Decisions
+
+- **Multiple cookie formats**: Accepts JSON arrays (EditThisCookie), semicolon strings, and Playwright storageState
+- **Resilient DOM scraping**: Uses 3 fallback selector strategies since Zalo frequently changes their HTML
+- **Session persistence**: After successful auth, the Playwright context state is saved to `auth_state/session.json` for reuse
+- **Anti-detection**: Custom user agent, disabled automation flags, Vietnamese locale
+- **Headless mode**: Runs entirely in the background — no visible browser window
+
+## Server Status
+
+The server is currently running at **http://localhost:8000** with hot-reload enabled.

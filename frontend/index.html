@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MMBZalo — Automation Tool</title>
+  <meta name="description" content="Zalo automation tool — messaging, friend requests, groups, and contact management." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Ambient background -->
+  <div class="bg-grid"></div>
+  <div class="bg-glow bg-glow--1"></div>
+  <div class="bg-glow bg-glow--2"></div>
+
+  <div class="app">
+    <!-- ═══ Header ═══ -->
+    <header class="header" id="app-header">
+      <div class="header__brand">
+        <div class="header__logo">
+          <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="url(#lg)" stroke-width="2.5"/><path d="M10 17l4 4 8-10" stroke="url(#lg)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="lg" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/></linearGradient></defs></svg>
+        </div>
+        <div>
+          <h1 class="header__title">MMBZalo</h1>
+          <p class="header__subtitle">Automation Tool v0.2</p>
+        </div>
+      </div>
+      <div class="header__right">
+        <div class="header__status" id="health-badge">
+          <span class="status-dot"></span>
+          <span>Checking…</span>
+        </div>
+        <div class="header__login-info" id="login-info" style="display:none;">
+          <span class="login-avatar" id="login-avatar"></span>
+          <span class="login-name" id="login-name"></span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ═══ Main Layout: Left Panel + Right Panel ═══ -->
+    <div class="panels">
+      <!-- ─── LEFT PANEL: Core Modules ─── -->
+      <div class="panel panel--left">
+        <!-- Navigation Tabs -->
+        <nav class="module-nav" id="module-nav">
+          <button class="nav-item nav-item--active" data-module="login" id="nav-login">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-7 9a7 7 0 1 1 14 0H3z"/></svg>
+            <span>Account</span>
+          </button>
+          <button class="nav-item" data-module="messaging" id="nav-messaging">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H9l-3 3v-3H4a2 2 0 0 1-2-2V5z"/><path d="M15 7v2a4 4 0 0 1-4 4H9.828l-1.766 1.767A2 2 0 0 0 9.828 17h2.586l3.586 3.586V17h1a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-1z"/></svg>
+            <span>Messaging</span>
+          </button>
+          <button class="nav-item" data-module="friends" id="nav-friends">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M8 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm5-3a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-8 9a5 5 0 0 1 10 0H5zm11-1a3 3 0 0 1 3 3h-3v-3z"/></svg>
+            <span>Friends</span>
+          </button>
+          <button class="nav-item" data-module="groups" id="nav-groups">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M13 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM18 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 15a4 4 0 0 0-8 0v3h8v-3zM6 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM16 18v-3a5.97 5.97 0 0 0-.75-2.91A3.99 3.99 0 0 1 19 15v3h-3zM4.75 12.09A5.97 5.97 0 0 0 4 15v3H1v-3a4 4 0 0 1 3.75-2.91z"/></svg>
+            <span>Groups</span>
+          </button>
+          <button class="nav-item" data-module="contacts" id="nav-contacts">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9 2a1 1 0 0 0 0 2h2a1 1 0 1 0 0-2H9z"/><path fill-rule="evenodd" d="M4 5a2 2 0 0 1 2-2 3 3 0 0 0 3 3h2a3 3 0 0 0 3-3 2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5zm3 4a1 1 0 0 0 0 2h.01a1 1 0 1 0 0-2H7zm3 0a1 1 0 0 0 0 2h3a1 1 0 1 0 0-2h-3zm-3 4a1 1 0 1 0 0 2h.01a1 1 0 1 0 0-2H7zm3 0a1 1 0 1 0 0 2h3a1 1 0 1 0 0-2h-3z" clip-rule="evenodd"/></svg>
+            <span>Contacts</span>
+          </button>
+        </nav>
+
+        <!-- Module Content Area -->
+        <div class="module-content">
+
+          <!-- ── LOGIN MODULE ── -->
+          <section class="module" id="mod-login">
+            <div class="card">
+              <div class="card__header">
+                <h2 class="card__title">
+                  <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                  Account Login
+                </h2>
+                <p class="card__desc">Open a Chromium browser window to log in to your Zalo account via QR code or phone number. The session will be saved for automation tasks.</p>
+              </div>
+              <div class="card__body">
+                <div class="login-status-card" id="login-status-card">
+                  <div class="login-state" id="login-state-icon">
+                    <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="24" cy="24" r="20"/><path d="M24 14v10l7 7" stroke-linecap="round"/></svg>
+                  </div>
+                  <p class="login-state-text" id="login-state-text">Not connected</p>
+                  <p class="login-state-detail" id="login-state-detail">Click "Start Login" to begin.</p>
+                </div>
+                <div class="actions">
+                  <button class="btn btn--primary" id="btn-login-start">
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM9.555 7.168A1 1 0 0 0 8 8v4a1 1 0 0 0 1.555.832l3-2a1 1 0 0 0 0-1.664l-3-2z" clip-rule="evenodd"/></svg>
+                    Start Login
+                  </button>
+                  <button class="btn btn--secondary" id="btn-login-stop" disabled>
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM8 7a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1H8z" clip-rule="evenodd"/></svg>
+                    Stop
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── MESSAGING MODULE ── -->
+          <section class="module" id="mod-messaging" style="display:none;">
+            <div class="card">
+              <div class="card__header">
+                <h2 class="card__title">
+                  <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  Send Messages
+                </h2>
+                <p class="card__desc">Send direct messages to phone numbers or contacts from your friend list. Messages are sent with randomized delays to avoid detection.</p>
+              </div>
+              <div class="card__body">
+                <label class="field-label" for="msg-targets">Target List</label>
+                <textarea id="msg-targets" class="field-textarea" rows="4" placeholder="Enter phone numbers or names, one per line&#10;0912345678&#10;0987654321&#10;Nguyễn Văn A" spellcheck="false"></textarea>
+                <p class="field-hint">One phone number or contact name per line.</p>
+
+                <label class="field-label" for="msg-content">Message</label>
+                <textarea id="msg-content" class="field-textarea" rows="4" placeholder="Type your message here…"></textarea>
+
+                <div class="field-row">
+                  <div class="field-group">
+                    <label class="field-label" for="msg-delay-min">Min Delay (s)</label>
+                    <input type="number" id="msg-delay-min" class="field-input" value="15" min="1" max="120" />
+                  </div>
+                  <div class="field-group">
+                    <label class="field-label" for="msg-delay-max">Max Delay (s)</label>
+                    <input type="number" id="msg-delay-max" class="field-input" value="30" min="1" max="120" />
+                  </div>
+                </div>
+
+                <div class="actions">
+                  <button class="btn btn--primary" id="btn-msg-send">
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
+                    Send Messages
+                  </button>
+                </div>
+
+                <!-- Results -->
+                <div class="task-result" id="msg-result" style="display:none;"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── FRIENDS MODULE ── -->
+          <section class="module" id="mod-friends" style="display:none;">
+            <div class="card">
+              <div class="card__header">
+                <h2 class="card__title">
+                  <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+                  Friend Requests
+                </h2>
+                <p class="card__desc">Automate friend requests using phone number lists. Optionally attach a custom greeting message.</p>
+              </div>
+              <div class="card__body">
+                <label class="field-label" for="friend-phones">Phone Numbers</label>
+                <textarea id="friend-phones" class="field-textarea" rows="4" placeholder="Enter phone numbers, one per line&#10;0912345678&#10;0987654321" spellcheck="false"></textarea>
+                <p class="field-hint">One phone number per line.</p>
+
+                <label class="field-label" for="friend-greeting">Greeting Message <span class="optional">(optional)</span></label>
+                <textarea id="friend-greeting" class="field-textarea" rows="2" placeholder="Xin chào! Mình muốn kết bạn với bạn."></textarea>
+
+                <div class="actions">
+                  <button class="btn btn--primary" id="btn-friend-send">
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M8 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm5-3a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-1.07 7.94A5 5 0 0 0 3 15v3h10v-3a5 5 0 0 0-.07-.06zM15 11h2v2h2v2h-2v2h-2v-2h-2v-2h2v-2z"/></svg>
+                    Send Friend Requests
+                  </button>
+                </div>
+
+                <div class="task-result" id="friend-result" style="display:none;"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── GROUPS MODULE ── -->
+          <section class="module" id="mod-groups" style="display:none;">
+            <div class="card">
+              <div class="card__header">
+                <h2 class="card__title">
+                  <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                  Group Functions
+                </h2>
+                <p class="card__desc">Send messages inside groups, invite members, and manage group communication.</p>
+              </div>
+              <div class="card__body">
+                <label class="field-label" for="group-name">Group Name</label>
+                <input type="text" id="group-name" class="field-input" placeholder="Enter the group name to search for" />
+
+                <label class="field-label" for="group-message">Message</label>
+                <textarea id="group-message" class="field-textarea" rows="4" placeholder="Type the message to send in the group…"></textarea>
+
+                <div class="actions">
+                  <button class="btn btn--primary" id="btn-group-send">
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
+                    Send to Group
+                  </button>
+                </div>
+
+                <div class="task-result" id="group-result" style="display:none;"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── CONTACTS MODULE ── -->
+          <section class="module" id="mod-contacts" style="display:none;">
+            <div class="card">
+              <div class="card__header">
+                <h2 class="card__title">
+                  <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                  Contact List
+                </h2>
+                <p class="card__desc">Synchronize your Zalo contacts and recent conversations.</p>
+              </div>
+              <div class="card__body">
+                <div class="actions">
+                  <button class="btn btn--primary" id="btn-sync-contacts">
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.008 9.057a1 1 0 0 1 1.276.61A5.002 5.002 0 0 0 14.001 13H11a1 1 0 1 1 0-2h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-2.101a7.002 7.002 0 0 1-11.601-2.566 1 1 0 0 1 .61-1.276z" clip-rule="evenodd"/></svg>
+                    Sync Contacts
+                  </button>
+                </div>
+
+                <!-- Contacts table -->
+                <div class="contacts-block" id="contacts-block" style="display:none;">
+                  <div class="contacts-header">
+                    <h3 class="contacts-title">Contacts</h3>
+                    <span class="contacts-count" id="contacts-count-badge"></span>
+                  </div>
+                  <div class="contacts-table-wrap">
+                    <table class="contacts-table" id="contacts-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Avatar</th>
+                          <th>Name</th>
+                          <th>Last Message</th>
+                          <th>Unread</th>
+                        </tr>
+                      </thead>
+                      <tbody id="contacts-tbody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+        </div><!-- .module-content -->
+      </div><!-- .panel--left -->
+
+      <!-- ─── RIGHT PANEL: Settings ─── -->
+      <div class="panel panel--right">
+        <div class="card">
+          <div class="card__header">
+            <h2 class="card__title">
+              <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              Settings
+            </h2>
+          </div>
+          <div class="card__body settings-body">
+            <!-- Language -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-label">Language</span>
+                <span class="setting-desc">Switch interface language</span>
+              </div>
+              <div class="toggle-group" id="toggle-lang">
+                <button class="toggle-btn toggle-btn--active" data-value="vi">VI</button>
+                <button class="toggle-btn" data-value="en">EN</button>
+              </div>
+            </div>
+
+            <!-- Theme -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-label">Theme</span>
+                <span class="setting-desc">Visual appearance</span>
+              </div>
+              <div class="toggle-group" id="toggle-theme">
+                <button class="toggle-btn toggle-btn--active" data-value="dark">Dark</button>
+                <button class="toggle-btn" data-value="light">Light</button>
+              </div>
+            </div>
+
+            <!-- Layout -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-label">Layout</span>
+                <span class="setting-desc">Panel arrangement</span>
+              </div>
+              <div class="toggle-group" id="toggle-layout">
+                <button class="toggle-btn toggle-btn--active" data-value="vertical">Vertical</button>
+                <button class="toggle-btn" data-value="horizontal">Horizontal</button>
+              </div>
+            </div>
+
+            <hr class="setting-divider" />
+
+            <!-- Proxy -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-label">Proxy</span>
+                <span class="setting-desc">IP rotation for bulk actions</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="proxy-toggle" />
+                <span class="switch__slider"></span>
+              </label>
+            </div>
+
+            <div class="proxy-fields" id="proxy-fields" style="display:none;">
+              <div class="field-row">
+                <div class="field-group">
+                  <label class="field-label" for="proxy-address">Address</label>
+                  <input type="text" id="proxy-address" class="field-input" placeholder="192.168.1.1" />
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="proxy-port">Port</label>
+                  <input type="number" id="proxy-port" class="field-input" placeholder="8080" />
+                </div>
+              </div>
+            </div>
+
+            <hr class="setting-divider" />
+
+            <!-- Delay config -->
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-label">Send Delays</span>
+                <span class="setting-desc">Default delay between actions (seconds)</span>
+              </div>
+            </div>
+            <div class="field-row" style="margin-top:8px;">
+              <div class="field-group">
+                <label class="field-label" for="setting-delay-min">Min</label>
+                <input type="number" id="setting-delay-min" class="field-input" value="15" min="1" />
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="setting-delay-max">Max</label>
+                <input type="number" id="setting-delay-max" class="field-input" value="30" min="1" />
+              </div>
+            </div>
+
+            <div class="actions" style="margin-top:16px;">
+              <button class="btn btn--secondary btn--sm" id="btn-save-settings">
+                <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M16.707 5.293a1 1 0 0 1 0 1.414l-8 8a1 1 0 0 1-1.414 0l-4-4a1 1 0 0 1 1.414-1.414L8 12.586l7.293-7.293a1 1 0 0 1 1.414 0z"/></svg>
+                Save Settings
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="card" style="margin-top:16px;">
+          <div class="card__header">
+            <h2 class="card__title" style="font-size:0.95rem;">
+              <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              Activity Log
+            </h2>
+          </div>
+          <div class="card__body">
+            <div class="activity-log" id="activity-log">
+              <p class="log-empty">No activity yet.</p>
+            </div>
+          </div>
+        </div>
+      </div><!-- .panel--right -->
+    </div><!-- .panels -->
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>MMBZalo v0.2 — Zalo Automation Tool</p>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
