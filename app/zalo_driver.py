@@ -16,10 +16,10 @@ Full feature set:
 
 import asyncio
 import functools
-import json
 import logging
 import os
 import random
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -29,6 +29,7 @@ from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserCon
 from app.models import (
     LoginState,
     ContactInfo,
+    ContactSyncDiagnostics,
     MessageResultItem,
     FriendRequestResultItem,
 )
@@ -39,6 +40,81 @@ ZALO_CHAT_URL = "https://chat.zalo.me/"
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 USER_DATA_DIR = os.path.join(BASE_DIR, "user_data")
 AUTH_STATE_DIR = os.path.join(BASE_DIR, "auth_state")
+SYNC_DEBUG_DIR = os.path.join(BASE_DIR, "debug_sync")
+SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+CONTACT_VIEW_SELECTORS = [
+    {
+        "name": "primary_virtualized",
+        "nav": [
+            '#main-tab .leftbar-tab.selected[title*="Danh b"]',
+            '#main-tab .leftbar-tab[title*="Danh b"]',
+            '#main-tab .leftbar-tab[title*="Contact"]',
+            '[data-tab="contacts"]',
+        ],
+        "view_markers": [
+            'text=/danh bạ|contacts/i',
+            '[aria-label*="Danh b"]',
+            '[aria-label*="Contact"]',
+            '[title*="Danh b"]',
+            '[title*="Contact"]',
+        ],
+        "container": [
+            '.ReactVirtualized__Grid',
+            '.ReactVirtualized__List',
+            '[class*="contact-list"]',
+            '[class*="ContactList"]',
+            '[class*="friend-list"]',
+            '[class*="FriendList"]',
+        ],
+        "item": [
+            'div[data-id]',
+            '[role="listitem"]',
+            '[role="option"]',
+            'div[class*="friend-item"]',
+            'div[class*="contact-item"]',
+        ],
+    },
+    {
+        "name": "fallback_sidebar",
+        "nav": [
+            '[class*="contact"]',
+            '[class*="phonebook"]',
+            '[class*="sidebar"] [role="button"]',
+        ],
+        "view_markers": [
+            'text=/danh bạ|contacts/i',
+            '[class*="contact"]',
+            '[class*="phonebook"]',
+        ],
+        "container": [
+            '[class*="sidebar"]',
+            '[class*="scroll"]',
+            '[id*="scroll"]',
+            '[role="listbox"]',
+            '[class*="list"]',
+        ],
+        "item": [
+            'div[data-id]',
+            'div[tabindex="0"]',
+            '[role="listitem"]',
+            '[role="option"]',
+        ],
+    },
+]
+
+EMPTY_STATE_SELECTORS = [
+    'text=/không có liên hệ|chưa có liên hệ|không có cuộc trò chuyện|no contacts|no conversations/i',
+    '[class*="empty"]',
+    '[class*="Empty"]',
+]
+
+CONVERSATION_VIEW_MARKERS = [
+    'text=/trò chuyện|messages|tin nhắn/i',
+    '[class*="conversation"]',
+    '[class*="chat-list"]',
+    '[class*="ConversationList"]',
+]
 
 # Single-thread executor — all Playwright calls run here
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
@@ -241,12 +317,17 @@ class ZaloDriver:
 
     def _worker_page(self) -> tuple:
         """Returns (context, page) with an authenticated Zalo session."""
+        if self._login_context and self._login_page and not self._login_page.is_closed():
+            self._wait_for_shell_ready(self._login_page)
+            if self._detect_auth(self._login_page):
+                logger.info("Reusing authenticated login browser for worker actions.")
+                return self._login_context, self._login_page
+
         context = self._get_worker_context()
         page = context.pages[0] if hasattr(context, "pages") and context.pages else context.new_page()
         page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=60_000)
-        
-        # Give Zalo extra time to load in headless mode (it syncs data on load)
-        time.sleep(8)
+
+        self._wait_for_shell_ready(page)
 
         if not self._detect_auth(page):
             context.close()
@@ -254,80 +335,464 @@ class ZaloDriver:
 
         return context, page
 
+    def _wait_for_shell_ready(self, page: Page, timeout_ms: int = 45_000):
+        """Wait until the Zalo shell has rendered enough UI for navigation."""
+        try:
+            page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        except Exception:
+            logger.info("Network idle wait timed out; falling back to DOM probes.")
+
+        deadline = time.time() + max(timeout_ms / 1000, 5)
+        shell_selectors = [
+            '[class*="sidebar"]',
+            '[class*="conversation"]',
+            '[class*="chat-list"]',
+            '#lst-conversation',
+            'div[data-id]',
+            'div[tabindex]',
+        ]
+        while time.time() < deadline:
+            for selector in shell_selectors:
+                try:
+                    if page.locator(selector).count() > 0:
+                        time.sleep(1.5)
+                        return
+                except Exception:
+                    continue
+            time.sleep(1)
+
+        time.sleep(3)
+
+    def _navigate_to_contact_view(self, page: Page) -> tuple[bool, Optional[str]]:
+        """Open the contacts or conversation surface that contains the list."""
+        if self._contact_view_matches(page, CONTACT_VIEW_SELECTORS[0]):
+            self._dismiss_contact_modal(page)
+            return True, CONTACT_VIEW_SELECTORS[0]["name"]
+
+        for strategy in CONTACT_VIEW_SELECTORS:
+            for selector in strategy["nav"]:
+                try:
+                    locator = page.locator(selector).first
+                    if locator.count() == 0:
+                        continue
+                    locator.click(timeout=3_000)
+                    time.sleep(2)
+                    self._dismiss_contact_modal(page)
+                    if self._contact_view_matches(page, strategy):
+                        return True, strategy["name"]
+                except Exception:
+                    continue
+
+        return False, None
+
+    def _contact_view_matches(self, page: Page, strategy: dict) -> bool:
+        """Confirm the UI looks like the contacts view, not just any sidebar list."""
+        if self._has_visible_locator(page, '#main-tab .leftbar-tab.selected[title*="Tin nh"]'):
+            return False
+
+        marker_selectors = [
+            '#main-tab .leftbar-tab.selected[title*="Danh b"]',
+            '#contact-search',
+            '#contact-search-input',
+        ] + strategy.get("view_markers", [])
+
+        if not any(self._has_visible_locator(page, selector) for selector in marker_selectors):
+            return False
+
+        if not self._find_contact_list_context(page, strategy):
+            return False
+
+        return True
+
+    def _dismiss_contact_modal(self, page: Page):
+        """Close the add-friend modal if contact navigation opened it by mistake."""
+        if not self._has_visible_locator(page, '#FIND_FRIEND'):
+            return
+
+        close_selectors = [
+            '#FIND_FRIEND .modal-header-icon',
+            '[data-id="btn_Main_AddFrd_CXL"]',
+        ]
+        for selector in close_selectors:
+            try:
+                locator = page.locator(selector).first
+                if locator.count() > 0 and locator.is_visible():
+                    locator.click(timeout=2_000)
+                    time.sleep(1)
+                    return
+            except Exception:
+                continue
+
+    def _looks_like_conversation_view(self, page: Page) -> bool:
+        hits = 0
+        for selector in CONVERSATION_VIEW_MARKERS:
+            if self._has_visible_locator(page, selector):
+                hits += 1
+        return hits >= 2
+
+    def _find_contact_list_context(self, page: Page, strategy: dict) -> Optional[dict]:
+        """Resolve the container and item selectors for the current UI layout."""
+        tagged_context = self._tag_contact_list_context(page, strategy)
+        if tagged_context:
+            return tagged_context
+
+        preferred_contexts = [
+            ("#container .ReactVirtualized__Grid.ReactVirtualized__List", ".contact-item-v2-wrapper"),
+            ("#container .ReactVirtualized__Grid.ReactVirtualized__List", ".contact-item-v2-alpha__section"),
+            ("#container .virtualized-scroll", ".contact-item-v2-wrapper"),
+        ]
+        for container_selector, item_selector in preferred_contexts:
+            try:
+                container = page.locator(container_selector).first
+                if container.count() == 0 or not container.is_visible():
+                    continue
+                if container.locator(item_selector).count() > 0:
+                    return {
+                        "strategy": strategy["name"],
+                        "container_selector": container_selector,
+                        "item_selector": item_selector,
+                    }
+            except Exception:
+                continue
+
+        # Do not fall back to generic Zalo grids here. Hidden conversation lists use
+        # the same virtualized primitives and can produce false "contacts".
+        return None
+
+        for container_selector in strategy["container"]:
+            try:
+                container = page.locator(container_selector).first
+                if container.count() == 0 or not container.is_visible():
+                    continue
+                for item_selector in strategy["item"]:
+                    try:
+                        if container.locator(item_selector).count() > 0:
+                            return {
+                                "strategy": strategy["name"],
+                                "container_selector": container_selector,
+                                "item_selector": item_selector,
+                            }
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return None
+
+    def _tag_contact_list_context(self, page: Page, strategy: dict) -> Optional[dict]:
+        """Find the actual contacts scroll container, skipping hidden chat and modal grids."""
+        found = page.evaluate(
+            """
+            () => {
+                const attr = 'data-mmbzalo-contact-container';
+                document.querySelectorAll(`[${attr}]`).forEach((el) => el.removeAttribute(attr));
+
+                const isVisible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+
+                const contacts = Array.from(document.querySelectorAll('#container .contact-item-v2-wrapper'))
+                    .filter((el) => isVisible(el) && !el.closest('#FIND_FRIEND'));
+
+                if (contacts.length === 0) return null;
+
+                let node = contacts[0].parentElement;
+                let scrollContainer = null;
+                while (node && node.id !== 'container') {
+                    const style = window.getComputedStyle(node);
+                    const overflow = `${style.overflow} ${style.overflowY}`;
+                    if (node.scrollHeight > node.clientHeight + 20 && /(auto|scroll)/.test(overflow)) {
+                        scrollContainer = node;
+                        break;
+                    }
+                    node = node.parentElement;
+                }
+
+                if (!scrollContainer) {
+                    scrollContainer = contacts[0].closest('.virtualized-scroll') || contacts[0].parentElement;
+                }
+
+                scrollContainer.setAttribute(attr, '1');
+                return {
+                    rawCount: contacts.length,
+                    scrollTop: scrollContainer.scrollTop || 0,
+                    scrollHeight: scrollContainer.scrollHeight || 0,
+                    clientHeight: scrollContainer.clientHeight || 0,
+                };
+            }
+            """
+        )
+
+        if not found:
+            return None
+
+        return {
+            "strategy": strategy["name"],
+            "container_selector": '[data-mmbzalo-contact-container="1"]',
+            "item_selector": ".contact-item-v2-wrapper",
+        }
+
+    def _has_visible_locator(self, page: Page, selector: str) -> bool:
+        try:
+            locator = page.locator(selector).first
+            return locator.count() > 0 and locator.is_visible()
+        except Exception:
+            return False
+
+    def _detect_empty_state(self, page: Page) -> bool:
+        for selector in EMPTY_STATE_SELECTORS:
+            try:
+                if page.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _collect_contact_candidates(self, page: Page, list_context: dict) -> dict:
+        contacts = page.evaluate(
+            """
+            ({ containerSelector, itemSelector }) => {
+                const container = document.querySelector(containerSelector);
+                if (!container) {
+                    return { contacts: [], rawCount: 0, scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
+                }
+
+                const nodes = Array.from(container.querySelectorAll(itemSelector));
+                const contacts = nodes.map((node) => {
+                    const textCandidates = Array.from(
+                        node.querySelectorAll('span, p, strong, h1, h2, h3, h4, h5, h6, div')
+                    )
+                        .map((el) => (el.textContent || '').trim())
+                        .filter(Boolean)
+                        .filter((value) => value.length < 140);
+                    const name = textCandidates[0] || (node.textContent || '').trim().split('\\n')[0] || '';
+                    const lastMessage = textCandidates.length > 1 ? textCandidates[1] : null;
+                    const imgEl = node.querySelector('img');
+                    const unreadEl = node.querySelector('[class*="badge"], [class*="unread"], [aria-label*="unread"]');
+                    return {
+                        zid: node.getAttribute('data-id') || node.dataset?.id || null,
+                        name,
+                        avatar_url: imgEl?.src || null,
+                        last_message: lastMessage,
+                        unread: !!unreadEl,
+                    };
+                }).filter((item) => item.name && item.name.length < 140);
+
+                const rawCount = nodes.length;
+                const scrollTop = container.scrollTop || 0;
+                const scrollHeight = container.scrollHeight || 0;
+                const clientHeight = container.clientHeight || 0;
+                return { contacts, rawCount, scrollTop, scrollHeight, clientHeight };
+            }
+            """,
+            {
+                "containerSelector": list_context["container_selector"],
+                "itemSelector": list_context["item_selector"],
+            },
+        )
+        return contacts
+
+    def _scroll_contact_container(self, page: Page, list_context: dict, delta: int = 900) -> int:
+        return page.evaluate(
+            """
+            ({ containerSelector, delta }) => {
+                const container = document.querySelector(containerSelector);
+                if (!container) return -1;
+                const before = container.scrollTop || 0;
+                container.scrollTop = before + delta;
+                return container.scrollTop || 0;
+            }
+            """,
+            {"containerSelector": list_context["container_selector"], "delta": delta},
+        )
+
+    def _build_contact_key(self, raw: dict) -> str:
+        if raw.get("zid"):
+            return f"id:{raw['zid']}"
+        name = re.sub(r"\s+", " ", (raw.get("name") or "").strip().lower())
+        avatar = (raw.get("avatar_url") or "").strip().lower()
+        return f"name_avatar:{name}|{avatar}"
+
+    def _merge_contact_record(self, existing: dict, incoming: dict) -> dict:
+        existing["name"] = incoming.get("name") or existing.get("name")
+        existing["avatar_url"] = incoming.get("avatar_url") or existing.get("avatar_url")
+        existing["last_message"] = incoming.get("last_message") or existing.get("last_message")
+        existing["unread"] = bool(existing.get("unread") or incoming.get("unread"))
+        return existing
+
+    def _capture_sync_debug(self, page: Page, label: str) -> list[str]:
+        if not SYNC_DEBUG_ENABLED:
+            return []
+
+        os.makedirs(SYNC_DEBUG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", label).strip("-") or "sync"
+        screenshot_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.png")
+        html_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.html")
+        artifacts = []
+
+        try:
+            page.screenshot(path=screenshot_path, full_page=True)
+            artifacts.append(screenshot_path)
+        except Exception as exc:
+            logger.warning(f"Failed to capture contact sync screenshot: {exc}")
+
+        try:
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(page.content())
+            artifacts.append(html_path)
+        except Exception as exc:
+            logger.warning(f"Failed to capture contact sync HTML: {exc}")
+
+        return artifacts
+
     # ═══════════════════════════════════════════════════════════
     #  CONTACTS
     # ═══════════════════════════════════════════════════════════
 
     def _sync_contacts_sync(self) -> dict:
+        diagnostics = ContactSyncDiagnostics()
         context, page = self._worker_page()
+        owns_context = context is not self._login_context
         try:
-            # Try clicking contacts tab
-            for sel in ['[data-tab="contacts"]', '[class*="contact"]', '[class*="phonebook"]',
-                        'div[title*="Danh b"]', 'div[title*="Contact"]']:
-                try:
-                    el = page.locator(sel).first
-                    if el.count() > 0:
-                        el.click()
-                        time.sleep(2)
-                        logger.info(f"Clicked contacts tab: {sel}")
-                        break
-                except Exception:
-                    continue
+            diagnostics.login_detected = self._detect_auth(page)
 
-            # We need to scroll to capture virtualized lists.
-            # Zalo unloads off-screen elements, so we collect, scroll, collect over a few iterations.
-            all_contacts = {}
-            
-            for _ in range(4): # 4 scroll iterations
-                contacts_data = page.evaluate("""
-                    () => {
-                        const results = [];
-                        const sels = ['div[data-id]','div[class*="conv-item"]','div[class*="ConversationItem"]',
-                                      'div[class*="friend-item"]','div[class*="contact-item"]',
-                                      '[role="listitem"]','[role="option"]'];
-                        for (const s of sels) {
-                            for (const el of document.querySelectorAll(s)) {
-                                const nameEl = el.querySelector('span,p,[class*="name"],[class*="truncate"]');
-                                const msgEl  = el.querySelector('[class*="msg"],[class*="last-msg"],[class*="subtitle"]');
-                                const imgEl  = el.querySelector('img');
-                                const badge  = el.querySelector('[class*="badge"],[class*="unread"]');
-                                const name = nameEl ? nameEl.textContent.trim() : '';
-                                if (name && name.length < 100) {
-                                    results.push({ name, avatar_url: imgEl?.src||null,
-                                        last_message: msgEl?.textContent.trim()||null, unread: !!badge });
-                                }
-                            }
-                            if (results.length > 0) break;
-                        }
-                        if (results.length === 0) {
-                            for (const el of document.querySelectorAll('div[tabindex="0"]')) {
-                                const text = el.textContent.trim(); const imgEl = el.querySelector('img');
-                                if (text && imgEl && text.length < 300) {
-                                    const name = text.split('\\n')[0].trim();
-                                    if (name) {
-                                        results.push({ name, avatar_url: imgEl.src, last_message: null, unread: false }); }
-                                }
-                            }
-                        }
-                        // Try to scroll the virtual list container down
-                        const scrollable = document.querySelector('.ReactVirtualized__Grid, [class*="scroll"], [id*="scroll"], .ReactVirtualized__List');
-                        if (scrollable) scrollable.scrollTop += 800;
-                        
-                        return results;
-                    }
-                """)
-                
-                # Aggregate to dict to remove duplicates by name
-                for c in contacts_data:
-                    all_contacts[c["name"]] = c
-                    
-                time.sleep(1) # wait for new virtual elements to render
+            target_view_detected, strategy_name = self._navigate_to_contact_view(page)
+            diagnostics.target_view_detected = target_view_detected
+            diagnostics.selector_family = strategy_name
 
-            contacts = [ContactInfo(**c) for c in all_contacts.values()]
-            return {"contacts": contacts, "contact_count": len(contacts),
-                    "message": f"Synced {len(contacts)} contact(s)."}
+            if not target_view_detected:
+                diagnostics.debug_artifacts = self._capture_sync_debug(page, "contact-view-not-found")
+                message = "Contact sync failed: authenticated session loaded, but the contact list view could not be located."
+                logger.warning(message)
+                return {
+                    "contacts": [],
+                    "contact_count": 0,
+                    "sync_status": "view_not_found",
+                    "diagnostics": diagnostics,
+                    "message": message,
+                }
+
+            list_context = None
+            preferred_strategies = [s for s in CONTACT_VIEW_SELECTORS if s["name"] == strategy_name]
+            fallback_strategies = [s for s in CONTACT_VIEW_SELECTORS if s["name"] != strategy_name]
+            for strategy in preferred_strategies + fallback_strategies:
+                list_context = self._find_contact_list_context(page, strategy)
+                if list_context:
+                    diagnostics.selector_family = strategy["name"]
+                    break
+
+            if not list_context:
+                diagnostics.debug_artifacts = self._capture_sync_debug(page, "contact-container-not-found")
+                message = "Contact sync failed: the contact view opened, but no readable contact list container was detected."
+                logger.warning(message)
+                return {
+                    "contacts": [],
+                    "contact_count": 0,
+                    "sync_status": "container_not_found",
+                    "diagnostics": diagnostics,
+                    "message": message,
+                }
+
+            aggregate = {}
+            raw_nodes_total = 0
+            stagnant_passes = 0
+            last_scroll_top = None
+            max_passes = 40
+            scroll_delta = 720
+
+            for pass_index in range(max_passes):
+                snapshot = self._collect_contact_candidates(page, list_context)
+                diagnostics.scroll_passes = pass_index + 1
+                raw_nodes_total += snapshot.get("rawCount", 0)
+
+                before_count = len(aggregate)
+                for raw_contact in snapshot.get("contacts", []):
+                    key = self._build_contact_key(raw_contact)
+                    if key in aggregate:
+                        aggregate[key] = self._merge_contact_record(aggregate[key], raw_contact)
+                    else:
+                        aggregate[key] = raw_contact
+
+                after_count = len(aggregate)
+                current_scroll_top = snapshot.get("scrollTop", 0)
+                scroll_height = snapshot.get("scrollHeight", 0)
+                client_height = snapshot.get("clientHeight", 0)
+                at_bottom = scroll_height > 0 and (current_scroll_top + client_height >= scroll_height - 12)
+                no_new_contacts = after_count == before_count
+
+                if no_new_contacts and current_scroll_top == last_scroll_top:
+                    stagnant_passes += 1
+                elif no_new_contacts:
+                    stagnant_passes = 1
+                else:
+                    stagnant_passes = 0
+
+                if at_bottom and stagnant_passes >= 2:
+                    break
+
+                next_scroll_top = self._scroll_contact_container(page, list_context, delta=scroll_delta)
+                if next_scroll_top == current_scroll_top and no_new_contacts:
+                    stagnant_passes += 1
+                last_scroll_top = next_scroll_top
+                time.sleep(1.4)
+
+            diagnostics.raw_nodes_found = raw_nodes_total
+            diagnostics.deduplicated_contacts = len(aggregate)
+            diagnostics.empty_state_detected = self._detect_empty_state(page)
+
+            contacts = [
+                ContactInfo(
+                    name=item["name"],
+                    avatar_url=item.get("avatar_url"),
+                    last_message=item.get("last_message"),
+                    unread=bool(item.get("unread")),
+                )
+                for item in aggregate.values()
+            ]
+
+            if contacts:
+                message = (
+                    f"Synced {len(contacts)} contact(s). "
+                    f"selector={diagnostics.selector_family}, passes={diagnostics.scroll_passes}, raw_nodes={diagnostics.raw_nodes_found}"
+                )
+                logger.info(message)
+                return {
+                    "contacts": contacts,
+                    "contact_count": len(contacts),
+                    "sync_status": "success",
+                    "diagnostics": diagnostics,
+                    "message": message,
+                }
+
+            if diagnostics.empty_state_detected:
+                message = "Contact sync completed: the contact list view was detected, but Zalo reported an empty contact list."
+                logger.info(message)
+                return {
+                    "contacts": [],
+                    "contact_count": 0,
+                    "sync_status": "empty",
+                    "diagnostics": diagnostics,
+                    "message": message,
+                }
+
+            diagnostics.debug_artifacts = self._capture_sync_debug(page, "contact-sync-no-results")
+            message = (
+                "Contact sync failed: authenticated session and contact view were detected, "
+                "but no contacts could be extracted from the rendered list."
+            )
+            logger.warning(message)
+            return {
+                "contacts": [],
+                "contact_count": 0,
+                "sync_status": "scrape_failed",
+                "diagnostics": diagnostics,
+                "message": message,
+            }
         finally:
-            context.close()
+            if owns_context:
+                context.close()
 
     async def sync_contacts(self) -> dict:
         return await _run_in_thread(self._sync_contacts_sync)

@@ -62,9 +62,22 @@ class ContactInfo(BaseModel):
     unread: bool = False
 
 
+class ContactSyncDiagnostics(BaseModel):
+    login_detected: bool = False
+    target_view_detected: bool = False
+    selector_family: Optional[str] = None
+    scroll_passes: int = 0
+    raw_nodes_found: int = 0
+    deduplicated_contacts: int = 0
+    empty_state_detected: bool = False
+    debug_artifacts: list[str] = Field(default_factory=list)
+
+
 class ContactListResult(BaseModel):
     contacts: list[ContactInfo] = []
     contact_count: int = 0
+    sync_status: str = "unknown"
+    diagnostics: ContactSyncDiagnostics = Field(default_factory=ContactSyncDiagnostics)
     message: str = ""
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
