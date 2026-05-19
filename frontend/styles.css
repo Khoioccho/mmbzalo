@@ -315,6 +315,39 @@ code,pre { font-family: var(--font-mono); }
 
 /* ─── Contacts Table ─────────────────────────────────────────── */
 .contacts-block { margin-top:16px; animation:fade-in var(--med); }
+.contacts-status {
+  margin-top:16px; padding:12px 14px;
+  border-radius:var(--radius-md);
+  border:1px solid var(--border-subtle);
+  background:rgba(255,255,255,0.03);
+  color:var(--text-secondary);
+  font-size:0.8rem;
+}
+.contacts-status--progress {
+  color:var(--accent);
+  border-color:rgba(99,102,241,0.25);
+  background:rgba(99,102,241,0.08);
+}
+.contacts-status--success {
+  color:var(--accent-green);
+  border-color:rgba(34,197,94,0.25);
+  background:rgba(34,197,94,0.08);
+}
+.contacts-status--partial {
+  color:var(--accent-amber);
+  border-color:rgba(245,158,11,0.25);
+  background:rgba(245,158,11,0.08);
+}
+.contacts-status--empty {
+  color:var(--accent-amber);
+  border-color:rgba(245,158,11,0.25);
+  background:rgba(245,158,11,0.08);
+}
+.contacts-status--error {
+  color:var(--accent-red);
+  border-color:rgba(239,68,68,0.25);
+  background:rgba(239,68,68,0.08);
+}
 .contacts-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
 .contacts-title { font-size:0.92rem; font-weight:700; }
 .contacts-count {

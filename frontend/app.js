@@ -307,6 +307,8 @@
   $("#btn-sync-contacts").addEventListener("click", async () => {
     const btn = $("#btn-sync-contacts");
     btn.disabled = true;
+    setContactsStatus("progress", "Syncing contacts from the authenticated Zalo session...");
+    $("#contacts-block").style.display = "none";
     btn.innerHTML = '<span class="spinner-inline"></span> Syncing…';
     log("Syncing contacts…");
 
@@ -315,15 +317,27 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed");
 
-      if (data.contacts && data.contacts.length > 0) {
+      if (data.sync_status === "success" && data.contacts && data.contacts.length > 0) {
         renderContacts(data);
+        setContactsStatus("success", data.message || `Synced ${data.contact_count} contact(s).`);
         log(`Synced ${data.contact_count} contact(s).`, "success");
+      } else if (data.sync_status === "partial" && data.contacts && data.contacts.length > 0) {
+        renderContacts(data);
+        setContactsStatus("partial", data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`);
+        log(data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`, "error");
+      } else if (data.sync_status === "empty") {
+        $("#contacts-block").style.display = "none";
+        setContactsStatus("empty", data.message || "The contact list appears to be empty.");
+        log(data.message || "No contacts found.", "success");
       } else {
         $("#contacts-block").style.display = "none";
-        log("No contacts found.", "error");
+        setContactsStatus("error", data.message || "Contact sync failed.");
+        log(data.message || "Contact sync failed.", "error");
       }
 
     } catch (err) {
+      $("#contacts-block").style.display = "none";
+      setContactsStatus("error", err.message);
       log(`Contact sync error: ${err.message}`, "error");
     } finally {
       btn.disabled = false;
@@ -352,6 +366,12 @@
   // ═══════════════════════════════════════════════════════════════
   //  SETTINGS
   // ═══════════════════════════════════════════════════════════════
+
+  function setContactsStatus(state, message) {
+    const el = $("#contacts-status");
+    el.className = `contacts-status contacts-status--${state}`;
+    el.textContent = message;
+  }
 
   // Load settings on start
   (async function loadSettings() {
