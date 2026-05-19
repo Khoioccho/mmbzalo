@@ -317,10 +317,14 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed");
 
-      if (data.contacts && data.contacts.length > 0) {
+      if (data.sync_status === "success" && data.contacts && data.contacts.length > 0) {
         renderContacts(data);
         setContactsStatus("success", data.message || `Synced ${data.contact_count} contact(s).`);
         log(`Synced ${data.contact_count} contact(s).`, "success");
+      } else if (data.sync_status === "partial" && data.contacts && data.contacts.length > 0) {
+        renderContacts(data);
+        setContactsStatus("partial", data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`);
+        log(data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`, "error");
       } else if (data.sync_status === "empty") {
         $("#contacts-block").style.display = "none";
         setContactsStatus("empty", data.message || "The contact list appears to be empty.");

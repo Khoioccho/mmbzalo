@@ -66,9 +66,19 @@ class ContactSyncDiagnostics(BaseModel):
     login_detected: bool = False
     target_view_detected: bool = False
     selector_family: Optional[str] = None
+    elapsed_seconds: float = 0.0
+    total_passes: int = 0
     scroll_passes: int = 0
+    forward_passes: int = 0
+    verification_passes: int = 0
     raw_nodes_found: int = 0
     deduplicated_contacts: int = 0
+    unique_ids_found: int = 0
+    contacts_without_ids: int = 0
+    bottom_reached: bool = False
+    verification_stabilized: bool = False
+    ended_by_timeout: bool = False
+    ended_by_safety_limit: bool = False
     empty_state_detected: bool = False
     debug_artifacts: list[str] = Field(default_factory=list)
 

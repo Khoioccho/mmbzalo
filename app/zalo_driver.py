@@ -607,6 +607,29 @@ class ZaloDriver:
             {"containerSelector": list_context["container_selector"], "delta": delta},
         )
 
+    def _set_contact_container_scroll(self, page: Page, list_context: dict, position: str) -> int:
+        return page.evaluate(
+            """
+            ({ containerSelector, position }) => {
+                const container = document.querySelector(containerSelector);
+                if (!container) return -1;
+                if (position === 'bottom') {
+                    container.scrollTop = container.scrollHeight;
+                } else if (position === 'top') {
+                    container.scrollTop = 0;
+                }
+                return container.scrollTop || 0;
+            }
+            """,
+            {"containerSelector": list_context["container_selector"], "position": position},
+        )
+
+    def _adaptive_scroll_delta(self, snapshot: dict) -> int:
+        client_height = snapshot.get("clientHeight", 0) or 0
+        if client_height <= 0:
+            return 720
+        return max(240, min(int(client_height * 0.85), 960))
+
     def _build_contact_key(self, raw: dict) -> str:
         if raw.get("zid"):
             return f"id:{raw['zid']}"
@@ -697,14 +720,24 @@ class ZaloDriver:
 
             aggregate = {}
             raw_nodes_total = 0
-            stagnant_passes = 0
+            bottom_stable_passes = 0
             last_scroll_top = None
-            max_passes = 40
-            scroll_delta = 720
+            max_passes = 160
+            timeout_seconds = 115.0
+            started_at = time.monotonic()
+            phase = "forward"
+            backfill_found_new_contacts = False
+            sync_completed = False
 
             for pass_index in range(max_passes):
+                elapsed_seconds = time.monotonic() - started_at
+                if elapsed_seconds >= timeout_seconds:
+                    diagnostics.ended_by_timeout = True
+                    break
+
                 snapshot = self._collect_contact_candidates(page, list_context)
-                diagnostics.scroll_passes = pass_index + 1
+                diagnostics.total_passes = pass_index + 1
+                diagnostics.scroll_passes = diagnostics.total_passes
                 raw_nodes_total += snapshot.get("rawCount", 0)
 
                 before_count = len(aggregate)
@@ -720,27 +753,83 @@ class ZaloDriver:
                 scroll_height = snapshot.get("scrollHeight", 0)
                 client_height = snapshot.get("clientHeight", 0)
                 at_bottom = scroll_height > 0 and (current_scroll_top + client_height >= scroll_height - 12)
-                no_new_contacts = after_count == before_count
+                new_contacts_found = after_count - before_count
+                diagnostics.bottom_reached = diagnostics.bottom_reached or at_bottom
 
-                if no_new_contacts and current_scroll_top == last_scroll_top:
-                    stagnant_passes += 1
-                elif no_new_contacts:
-                    stagnant_passes = 1
-                else:
-                    stagnant_passes = 0
+                if phase == "forward":
+                    diagnostics.forward_passes += 1
+                    if at_bottom:
+                        phase = "stabilize_bottom"
+                        bottom_stable_passes = 1 if new_contacts_found == 0 else 0
+                    else:
+                        next_scroll_top = self._scroll_contact_container(
+                            page,
+                            list_context,
+                            delta=self._adaptive_scroll_delta(snapshot),
+                        )
+                        last_scroll_top = next_scroll_top
+                        time.sleep(0.6)
+                        continue
 
-                if at_bottom and stagnant_passes >= 2:
+                elif phase == "stabilize_bottom":
+                    diagnostics.verification_passes += 1
+                    if new_contacts_found == 0:
+                        bottom_stable_passes += 1
+                    else:
+                        bottom_stable_passes = 0
+
+                    if bottom_stable_passes >= 2:
+                        phase = "backfill_up"
+                    else:
+                        self._set_contact_container_scroll(page, list_context, "bottom")
+                        time.sleep(0.5)
+                        continue
+
+                elif phase == "backfill_up":
+                    diagnostics.verification_passes += 1
+                    upward_delta = -max(int(client_height * 1.5), 360)
+                    next_scroll_top = self._scroll_contact_container(page, list_context, delta=upward_delta)
+                    last_scroll_top = next_scroll_top
+                    phase = "backfill_collect_up"
+                    time.sleep(0.6)
+                    continue
+
+                elif phase == "backfill_collect_up":
+                    diagnostics.verification_passes += 1
+                    backfill_found_new_contacts = new_contacts_found > 0
+                    self._set_contact_container_scroll(page, list_context, "bottom")
+                    phase = "backfill_collect_down"
+                    time.sleep(0.6)
+                    continue
+
+                elif phase == "backfill_collect_down":
+                    diagnostics.verification_passes += 1
+                    if new_contacts_found > 0 or backfill_found_new_contacts:
+                        backfill_found_new_contacts = False
+                        bottom_stable_passes = 0
+                        phase = "stabilize_bottom"
+                        self._set_contact_container_scroll(page, list_context, "bottom")
+                        time.sleep(0.5)
+                        continue
+
+                    diagnostics.verification_stabilized = True
+                    sync_completed = True
                     break
 
-                next_scroll_top = self._scroll_contact_container(page, list_context, delta=scroll_delta)
-                if next_scroll_top == current_scroll_top and no_new_contacts:
-                    stagnant_passes += 1
-                last_scroll_top = next_scroll_top
-                time.sleep(1.4)
+                if last_scroll_top == current_scroll_top and not at_bottom and phase == "forward":
+                    self._set_contact_container_scroll(page, list_context, "bottom")
+                    time.sleep(0.6)
+                    continue
+
+            else:
+                diagnostics.ended_by_safety_limit = True
 
             diagnostics.raw_nodes_found = raw_nodes_total
             diagnostics.deduplicated_contacts = len(aggregate)
             diagnostics.empty_state_detected = self._detect_empty_state(page)
+            diagnostics.elapsed_seconds = round(time.monotonic() - started_at, 2)
+            diagnostics.unique_ids_found = len({item["zid"] for item in aggregate.values() if item.get("zid")})
+            diagnostics.contacts_without_ids = sum(1 for item in aggregate.values() if not item.get("zid"))
 
             contacts = [
                 ContactInfo(
@@ -752,16 +841,36 @@ class ZaloDriver:
                 for item in aggregate.values()
             ]
 
-            if contacts:
+            if sync_completed and contacts:
                 message = (
-                    f"Synced {len(contacts)} contact(s). "
-                    f"selector={diagnostics.selector_family}, passes={diagnostics.scroll_passes}, raw_nodes={diagnostics.raw_nodes_found}"
+                    f"Synced {len(contacts)} contact(s) completely. "
+                    f"selector={diagnostics.selector_family}, passes={diagnostics.total_passes}, "
+                    f"verify={diagnostics.verification_passes}, raw_nodes={diagnostics.raw_nodes_found}"
                 )
                 logger.info(message)
                 return {
                     "contacts": contacts,
                     "contact_count": len(contacts),
                     "sync_status": "success",
+                    "diagnostics": diagnostics,
+                    "message": message,
+                }
+
+            if contacts:
+                limit_reason = "time limit" if diagnostics.ended_by_timeout else "safety limit"
+                if not diagnostics.ended_by_timeout and not diagnostics.ended_by_safety_limit:
+                    limit_reason = "verification did not stabilize"
+                message = (
+                    f"Contact sync is partial: collected {len(contacts)} contact(s), "
+                    f"but completeness could not be proven before {limit_reason}. "
+                    f"selector={diagnostics.selector_family}, passes={diagnostics.total_passes}, "
+                    f"bottom_reached={diagnostics.bottom_reached}, verify={diagnostics.verification_passes}"
+                )
+                logger.warning(message)
+                return {
+                    "contacts": contacts,
+                    "contact_count": len(contacts),
+                    "sync_status": "partial",
                     "diagnostics": diagnostics,
                     "message": message,
                 }
