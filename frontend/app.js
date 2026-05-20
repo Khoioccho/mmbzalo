@@ -10,6 +10,13 @@
   const $$ = (sel) => document.querySelectorAll(sel);
   let loginPollInterval = null;
   let lastCampaignPreview = null;
+  const manualPickerState = {
+    contacts: [],
+    filtered: [],
+    loaded: false,
+    loading: false,
+    error: "",
+  };
 
   async function checkHealth() {
     try {
@@ -73,6 +80,145 @@
       second: "2-digit",
       hour12: false,
     });
+  }
+
+  function normalizeSearchText(value) {
+    return (value || "").trim().toLocaleLowerCase();
+  }
+
+  function getManualTargetLines() {
+    return $("#msg-targets").value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  function getManualTargetLookup() {
+    return new Set(getManualTargetLines().map((line) => normalizeSearchText(line)));
+  }
+
+  function appendManualTarget(name) {
+    const textarea = $("#msg-targets");
+    const existing = getManualTargetLines();
+    const lookup = new Set(existing.map((line) => normalizeSearchText(line)));
+    const normalized = normalizeSearchText(name);
+    if (!normalized || lookup.has(normalized)) return false;
+    existing.push(name);
+    textarea.value = `${existing.join("\n")}\n`;
+    return true;
+  }
+
+  function setContactPickerStatus(message, type = "neutral") {
+    const el = $("#contact-picker-status");
+    el.textContent = message;
+    el.dataset.state = type;
+  }
+
+  function filterManualPickerContacts() {
+    const query = normalizeSearchText($("#contact-picker-search").value);
+    manualPickerState.filtered = manualPickerState.contacts.filter((contact) => {
+      return !query || normalizeSearchText(contact.name).includes(query);
+    });
+  }
+
+  function renderManualPickerList() {
+    const list = $("#contact-picker-list");
+    const lookup = getManualTargetLookup();
+
+    if (manualPickerState.loading) {
+      list.innerHTML = '<div class="picker-empty">Loading stored contacts...</div>';
+      return;
+    }
+
+    if (manualPickerState.error) {
+      list.innerHTML = `<div class="picker-empty">${esc(manualPickerState.error)}</div>`;
+      return;
+    }
+
+    if (!manualPickerState.contacts.length) {
+      list.innerHTML = '<div class="picker-empty">No stored contacts yet. Sync contacts first in the Contacts tab.</div>';
+      return;
+    }
+
+    if (!manualPickerState.filtered.length) {
+      list.innerHTML = '<div class="picker-empty">No stored contacts matched the current search.</div>';
+      return;
+    }
+
+    list.innerHTML = manualPickerState.filtered.map((contact) => {
+      const isAdded = lookup.has(normalizeSearchText(contact.name));
+      const subtitleParts = [
+        contact.identity_source || "unknown",
+        contact.last_seen_at ? formatTimestamp(contact.last_seen_at) : "No last seen timestamp",
+      ];
+      return `
+        <div class="picker-contact">
+          <div class="picker-contact__main">
+            ${
+              contact.avatar_url
+                ? `<img src="${esc(contact.avatar_url)}" class="picker-contact__avatar" alt="" />`
+                : `<span class="picker-contact__avatar picker-contact__avatar--placeholder">${esc((contact.name || "?").slice(0, 1))}</span>`
+            }
+            <div class="picker-contact__meta">
+              <span class="picker-contact__name">${esc(contact.name)}</span>
+              <span class="picker-contact__sub">${esc(subtitleParts.join(" | "))}</span>
+            </div>
+          </div>
+          <div class="picker-contact__actions">
+            <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : ""}">${contact.unread ? "Unread" : "Seen"}</span>
+            <span class="picker-contact__state ${isAdded ? "picker-contact__state--added" : ""}">${isAdded ? "Added" : "Ready"}</span>
+            <button class="btn btn--secondary btn--sm" type="button" data-contact-name="${esc(contact.name)}">${isAdded ? "Added" : "Add"}</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  async function loadManualPickerContacts() {
+    manualPickerState.loading = true;
+    manualPickerState.error = "";
+    manualPickerState.contacts = [];
+    manualPickerState.filtered = [];
+    setContactPickerStatus("Loading stored contacts...", "loading");
+    renderManualPickerList();
+
+    try {
+      const res = await fetch("/api/contacts");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to load stored contacts.");
+      manualPickerState.contacts = data.contacts || [];
+      manualPickerState.loaded = true;
+      filterManualPickerContacts();
+      if (manualPickerState.contacts.length) {
+        setContactPickerStatus(`Loaded ${manualPickerState.contacts.length} stored contact(s). Select names to add them into the manual target list.`, "success");
+      } else {
+        setContactPickerStatus("No stored contacts yet. Sync contacts first in the Contacts tab.", "empty");
+      }
+    } catch (err) {
+      manualPickerState.error = err.message;
+      setContactPickerStatus(err.message, "error");
+      log(`Contact picker load error: ${err.message}`, "error");
+    } finally {
+      manualPickerState.loading = false;
+      renderManualPickerList();
+    }
+  }
+
+  async function openManualPicker() {
+    const modal = $("#contact-picker-modal");
+    modal.style.display = "flex";
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+    $("#contact-picker-search").value = "";
+    $("#contact-picker-search").focus();
+    await loadManualPickerContacts();
+  }
+
+  function closeManualPicker() {
+    const modal = $("#contact-picker-modal");
+    modal.style.display = "none";
+    modal.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("modal-open");
   }
 
   function showTaskResult(elId, data, type) {
@@ -381,6 +527,42 @@
   }
 
   function bindMessaging() {
+    $("#btn-open-contact-picker").addEventListener("click", () => {
+      openManualPicker();
+    });
+
+    $("#btn-close-contact-picker").addEventListener("click", () => {
+      closeManualPicker();
+    });
+
+    $("#contact-picker-backdrop").addEventListener("click", () => {
+      closeManualPicker();
+    });
+
+    $("#contact-picker-search").addEventListener("input", () => {
+      filterManualPickerContacts();
+      renderManualPickerList();
+    });
+
+    $("#contact-picker-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-contact-name]");
+      if (!btn) return;
+      const name = btn.dataset.contactName || "";
+      if (!name) return;
+      const added = appendManualTarget(name);
+      renderManualPickerList();
+      log(
+        added ? `Added '${name}' to manual targets.` : `'${name}' is already in the manual target list.`,
+        added ? "success" : ""
+      );
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && $("#contact-picker-modal").style.display !== "none") {
+        closeManualPicker();
+      }
+    });
+
     $("#btn-msg-send").addEventListener("click", async () => {
       const raw = $("#msg-targets").value.trim();
       const message = $("#msg-content").value.trim();
