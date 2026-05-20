@@ -1,6 +1,6 @@
 /**
- * MMBZalo — Dashboard Client Logic
- * Handles: Login flow, Messaging, Friend Requests, Groups, Contacts, Settings
+ * MMBZalo - Dashboard Client Logic
+ * Handles: Login flow, Messaging, Friend Requests, Groups, Contacts, Campaigns, Settings
  */
 
 (() => {
@@ -8,431 +8,39 @@
 
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
-
-  // ═══════════════════════════════════════════════════════════════
-  //  HEALTH CHECK
-  // ═══════════════════════════════════════════════════════════════
+  let loginPollInterval = null;
+  let lastCampaignPreview = null;
 
   async function checkHealth() {
     try {
       const res = await fetch("/api/health");
       if (res.ok) {
-        const dot = $("#health-badge .status-dot");
-        dot.className = "status-dot status-dot--ok";
+        $("#health-badge .status-dot").className = "status-dot status-dot--ok";
         $("#health-badge span:last-child").textContent = "API Online";
       }
     } catch {
-      const dot = $("#health-badge .status-dot");
-      dot.className = "status-dot status-dot--err";
+      $("#health-badge .status-dot").className = "status-dot status-dot--err";
       $("#health-badge span:last-child").textContent = "API Offline";
     }
   }
-  checkHealth();
-
-  // ═══════════════════════════════════════════════════════════════
-  //  MODULE NAVIGATION
-  // ═══════════════════════════════════════════════════════════════
-
-  const navItems = $$(".nav-item");
-  const modules = $$(".module");
-
-  navItems.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      navItems.forEach((b) => b.classList.remove("nav-item--active"));
-      btn.classList.add("nav-item--active");
-
-      const target = btn.dataset.module;
-      modules.forEach((m) => {
-        m.style.display = m.id === `mod-${target}` ? "block" : "none";
-      });
-    });
-  });
-
-  // ═══════════════════════════════════════════════════════════════
-  //  ACTIVITY LOG
-  // ═══════════════════════════════════════════════════════════════
 
   function log(msg, type = "") {
     const logEl = $("#activity-log");
     const empty = logEl.querySelector(".log-empty");
     if (empty) empty.remove();
-
     const now = new Date().toLocaleTimeString("en-GB", { hour12: false });
     const entry = document.createElement("div");
     entry.className = "log-entry";
     entry.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${type ? "log-msg--" + type : ""}">${esc(msg)}</span>`;
     logEl.prepend(entry);
-
-    // Keep only last 50 entries
     while (logEl.children.length > 50) logEl.lastChild.remove();
   }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  LOGIN FLOW
-  // ═══════════════════════════════════════════════════════════════
-
-  const btnLoginStart = $("#btn-login-start");
-  const btnLoginStop = $("#btn-login-stop");
-  const loginStateIcon = $("#login-state-icon");
-  const loginStateText = $("#login-state-text");
-  const loginStateDetail = $("#login-state-detail");
-  const loginInfo = $("#login-info");
-  const loginName = $("#login-name");
-
-  let loginPollInterval = null;
-
-  btnLoginStart.addEventListener("click", async () => {
-    btnLoginStart.disabled = true;
-    btnLoginStop.disabled = false;
-    loginStateText.textContent = "Starting browser…";
-    loginStateDetail.textContent = "Please wait…";
-    loginStateIcon.className = "login-state login-state--waiting";
-    log("Starting login browser…");
-
-    try {
-      const res = await fetch("/api/login/start", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-
-      loginStateText.textContent = "Waiting for login";
-      loginStateDetail.textContent = "Scan QR code or enter phone number in the browser window.";
-      log("Browser opened — waiting for QR/phone login.");
-
-      // Start polling for login status
-      startLoginPolling();
-
-    } catch (err) {
-      loginStateText.textContent = "Error";
-      loginStateDetail.textContent = err.message;
-      loginStateIcon.className = "login-state login-state--err";
-      btnLoginStart.disabled = false;
-      log(err.message, "error");
-    }
-  });
-
-  btnLoginStop.addEventListener("click", async () => {
-    stopLoginPolling();
-    try {
-      await fetch("/api/login/stop", { method: "POST" });
-    } catch {}
-    btnLoginStart.disabled = false;
-    btnLoginStop.disabled = true;
-    loginStateText.textContent = "Not connected";
-    loginStateDetail.textContent = 'Click "Start Login" to begin.';
-    loginStateIcon.className = "login-state";
-    loginInfo.style.display = "none";
-    log("Login browser closed.");
-  });
-
-  function startLoginPolling() {
-    stopLoginPolling();
-    loginPollInterval = setInterval(async () => {
-      try {
-        const res = await fetch("/api/login/status");
-        const data = await res.json();
-
-        if (data.state === "authenticated") {
-          stopLoginPolling();
-          loginStateText.textContent = "Authenticated";
-          loginStateDetail.textContent = data.profile_name
-            ? `Logged in as: ${data.profile_name}`
-            : "Session is active.";
-          loginStateIcon.className = "login-state login-state--ok";
-          loginStateIcon.innerHTML = '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2"><circle cx="24" cy="24" r="20"/><path d="M14 24l6 6 14-14" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-          btnLoginStart.disabled = true;
-
-          if (data.profile_name) {
-            loginInfo.style.display = "flex";
-            loginName.textContent = data.profile_name;
-          }
-
-          log(`Authenticated as: ${data.profile_name || "Unknown"}`, "success");
-
-        } else if (data.state === "error" || data.state === "expired") {
-          stopLoginPolling();
-          loginStateText.textContent = data.state === "expired" ? "Session Expired" : "Error";
-          loginStateDetail.textContent = data.message;
-          loginStateIcon.className = "login-state login-state--err";
-          btnLoginStart.disabled = false;
-          log(data.message, "error");
-
-        } else if (data.state === "idle") {
-          stopLoginPolling();
-          loginStateText.textContent = "Not connected";
-          loginStateDetail.textContent = data.message;
-          loginStateIcon.className = "login-state";
-          btnLoginStart.disabled = false;
-          btnLoginStop.disabled = true;
-        }
-        // "waiting_qr" → keep polling
-      } catch {}
-    }, 2500);
-  }
-
-  function stopLoginPolling() {
-    if (loginPollInterval) {
-      clearInterval(loginPollInterval);
-      loginPollInterval = null;
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  MESSAGING
-  // ═══════════════════════════════════════════════════════════════
-
-  $("#btn-msg-send").addEventListener("click", async () => {
-    const raw = $("#msg-targets").value.trim();
-    const message = $("#msg-content").value.trim();
-    if (!raw) return alert("Enter target phone numbers or names.");
-    if (!message) return alert("Enter a message.");
-
-    const targets = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-    const delayMin = parseFloat($("#msg-delay-min").value) || 15;
-    const delayMax = parseFloat($("#msg-delay-max").value) || 30;
-
-    const btn = $("#btn-msg-send");
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-inline"></span> Sending…';
-    log(`Sending message to ${targets.length} target(s)…`);
-
-    try {
-      const res = await fetch("/api/message/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targets, message, delay_min: delayMin, delay_max: delayMax }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-
-      showTaskResult("msg-result", data, "message");
-      log(`Messaging done: ${data.sent}/${data.total} sent, ${data.failed} failed.`,
-          data.failed > 0 ? "error" : "success");
-
-    } catch (err) {
-      showTaskResultError("msg-result", err.message);
-      log(`Messaging error: ${err.message}`, "error");
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg> Send Messages';
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════════
-  //  FRIEND REQUESTS
-  // ═══════════════════════════════════════════════════════════════
-
-  $("#btn-friend-send").addEventListener("click", async () => {
-    const raw = $("#friend-phones").value.trim();
-    if (!raw) return alert("Enter phone numbers.");
-
-    const phoneNumbers = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-    const greeting = $("#friend-greeting").value.trim() || null;
-
-    const btn = $("#btn-friend-send");
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-inline"></span> Sending…';
-    log(`Sending ${phoneNumbers.length} friend request(s)…`);
-
-    try {
-      const res = await fetch("/api/friends/add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone_numbers: phoneNumbers, greeting_message: greeting }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-
-      showTaskResult("friend-result", data, "friend");
-      log(`Friend requests: ${data.sent}/${data.total} sent.`,
-          data.failed > 0 ? "error" : "success");
-
-    } catch (err) {
-      showTaskResultError("friend-result", err.message);
-      log(`Friend request error: ${err.message}`, "error");
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M8 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm5-3a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-1.07 7.94A5 5 0 0 0 3 15v3h10v-3a5 5 0 0 0-.07-.06zM15 11h2v2h2v2h-2v2h-2v-2h-2v-2h2v-2z"/></svg> Send Friend Requests';
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════════
-  //  GROUPS
-  // ═══════════════════════════════════════════════════════════════
-
-  $("#btn-group-send").addEventListener("click", async () => {
-    const groupName = $("#group-name").value.trim();
-    const message = $("#group-message").value.trim();
-    if (!groupName) return alert("Enter a group name.");
-    if (!message) return alert("Enter a message.");
-
-    const btn = $("#btn-group-send");
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-inline"></span> Sending…';
-    log(`Sending message to group "${groupName}"…`);
-
-    try {
-      const res = await fetch("/api/groups/message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ group_name: groupName, message }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-
-      const el = $("#group-result");
-      el.style.display = "block";
-      if (data.success) {
-        el.className = "task-result task-result--success";
-        el.innerHTML = `<div class="task-result__title">✓ Message Sent</div><div class="task-result__detail">${esc(data.message)}</div>`;
-        log(`Group message sent to "${groupName}".`, "success");
-      } else {
-        el.className = "task-result task-result--fail";
-        el.innerHTML = `<div class="task-result__title">✗ Failed</div><div class="task-result__detail">${esc(data.message)}</div>`;
-        log(`Group message failed: ${data.message}`, "error");
-      }
-
-    } catch (err) {
-      showTaskResultError("group-result", err.message);
-      log(`Group error: ${err.message}`, "error");
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg> Send to Group';
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════════════
-  //  CONTACTS
-  // ═══════════════════════════════════════════════════════════════
-
-  $("#btn-sync-contacts").addEventListener("click", async () => {
-    const btn = $("#btn-sync-contacts");
-    btn.disabled = true;
-    setContactsStatus("progress", "Syncing contacts from the authenticated Zalo session...");
-    $("#contacts-block").style.display = "none";
-    btn.innerHTML = '<span class="spinner-inline"></span> Syncing…';
-    log("Syncing contacts…");
-
-    try {
-      const res = await fetch("/api/contacts");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-
-      if (data.sync_status === "success" && data.contacts && data.contacts.length > 0) {
-        renderContacts(data);
-        setContactsStatus("success", data.message || `Synced ${data.contact_count} contact(s).`);
-        log(`Synced ${data.contact_count} contact(s).`, "success");
-      } else if (data.sync_status === "partial" && data.contacts && data.contacts.length > 0) {
-        renderContacts(data);
-        setContactsStatus("partial", data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`);
-        log(data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`, "error");
-      } else if (data.sync_status === "empty") {
-        $("#contacts-block").style.display = "none";
-        setContactsStatus("empty", data.message || "The contact list appears to be empty.");
-        log(data.message || "No contacts found.", "success");
-      } else {
-        $("#contacts-block").style.display = "none";
-        setContactsStatus("error", data.message || "Contact sync failed.");
-        log(data.message || "Contact sync failed.", "error");
-      }
-
-    } catch (err) {
-      $("#contacts-block").style.display = "none";
-      setContactsStatus("error", err.message);
-      log(`Contact sync error: ${err.message}`, "error");
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.008 9.057a1 1 0 0 1 1.276.61A5.002 5.002 0 0 0 14.001 13H11a1 1 0 1 1 0-2h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-2.101a7.002 7.002 0 0 1-11.601-2.566 1 1 0 0 1 .61-1.276z" clip-rule="evenodd"/></svg> Sync Contacts';
-    }
-  });
-
-  function renderContacts(data) {
-    const block = $("#contacts-block");
-    block.style.display = "block";
-    $("#contacts-count-badge").textContent = `${data.contact_count} found`;
-
-    const tbody = $("#contacts-tbody");
-    tbody.innerHTML = data.contacts
-      .map((c, i) => `
-        <tr>
-          <td>${i + 1}</td>
-          <td>${c.avatar_url ? `<img src="${c.avatar_url}" class="contact-avatar" alt="" />` : "—"}</td>
-          <td class="contact-name">${esc(c.name)}</td>
-          <td>${c.last_message ? esc(c.last_message) : "—"}</td>
-          <td>${c.unread ? '<span class="unread-dot"></span>' : "—"}</td>
-        </tr>`)
-      .join("");
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  SETTINGS
-  // ═══════════════════════════════════════════════════════════════
 
   function setContactsStatus(state, message) {
     const el = $("#contacts-status");
     el.className = `contacts-status contacts-status--${state}`;
     el.textContent = message;
   }
-
-  // Load settings on start
-  (async function loadSettings() {
-    try {
-      const res = await fetch("/api/settings");
-      if (res.ok) {
-        const s = await res.json();
-        setToggle("toggle-lang", s.language);
-        setToggle("toggle-theme", s.theme);
-        setToggle("toggle-layout", s.layout);
-        $("#proxy-toggle").checked = s.proxy_enabled;
-        $("#proxy-fields").style.display = s.proxy_enabled ? "block" : "none";
-        if (s.proxy_address) $("#proxy-address").value = s.proxy_address;
-        if (s.proxy_port) $("#proxy-port").value = s.proxy_port;
-        $("#setting-delay-min").value = s.delay_min;
-        $("#setting-delay-max").value = s.delay_max;
-      }
-    } catch {}
-  })();
-
-  // Toggle groups
-  $$(".toggle-group").forEach((group) => {
-    group.querySelectorAll(".toggle-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        group.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("toggle-btn--active"));
-        btn.classList.add("toggle-btn--active");
-      });
-    });
-  });
-
-  // Proxy toggle
-  $("#proxy-toggle").addEventListener("change", (e) => {
-    $("#proxy-fields").style.display = e.target.checked ? "block" : "none";
-  });
-
-  // Save settings
-  $("#btn-save-settings").addEventListener("click", async () => {
-    const settings = {
-      language: getToggle("toggle-lang"),
-      theme: getToggle("toggle-theme"),
-      layout: getToggle("toggle-layout"),
-      proxy_enabled: $("#proxy-toggle").checked,
-      proxy_address: $("#proxy-address").value || null,
-      proxy_port: parseInt($("#proxy-port").value) || null,
-      delay_min: parseFloat($("#setting-delay-min").value) || 15,
-      delay_max: parseFloat($("#setting-delay-max").value) || 30,
-    };
-
-    try {
-      const res = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
-      });
-      if (res.ok) {
-        log("Settings saved.", "success");
-      }
-    } catch (err) {
-      log(`Settings save error: ${err.message}`, "error");
-    }
-  });
 
   function getToggle(groupId) {
     const active = $(`#${groupId} .toggle-btn--active`);
@@ -442,40 +50,48 @@
   function setToggle(groupId, value) {
     const group = $(`#${groupId}`);
     if (!group) return;
-    group.querySelectorAll(".toggle-btn").forEach((b) => {
-      b.classList.toggle("toggle-btn--active", b.dataset.value === value);
+    group.querySelectorAll(".toggle-btn").forEach((btn) => {
+      btn.classList.toggle("toggle-btn--active", btn.dataset.value === value);
     });
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  HELPERS
-  // ═══════════════════════════════════════════════════════════════
-
   function esc(str) {
     const d = document.createElement("div");
-    d.textContent = str;
+    d.textContent = str ?? "";
     return d.innerHTML;
+  }
+
+  function formatTimestamp(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString("en-GB", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
   }
 
   function showTaskResult(elId, data, type) {
     const el = $(`#${elId}`);
     el.style.display = "block";
-
     const isSuccess = data.failed === 0;
     el.className = `task-result ${isSuccess ? "task-result--success" : "task-result--info"}`;
-
-    const icon = isSuccess ? "✓" : "⚠";
-    let items = "";
+    const icon = isSuccess ? "OK" : "WARN";
     const list = data.results || [];
-    if (list.length > 0) {
-      items = '<ul class="task-result__items">' +
-        list.map((r) => {
-          const label = type === "friend" ? r.phone : r.target;
-          return r.success
-            ? `<li class="success">✓ ${esc(label)}</li>`
-            : `<li class="fail">✗ ${esc(label)} — ${esc(r.error || "Unknown error")}</li>`;
-        }).join("") + "</ul>";
-    }
+    const items = list.length > 0
+      ? `<ul class="task-result__items">${
+          list.map((r) => {
+            const label = type === "friend" ? r.phone : r.target;
+            return r.success
+              ? `<li class="success">OK ${esc(label)}</li>`
+              : `<li class="fail">ERR ${esc(label)} - ${esc(r.error || "Unknown error")}</li>`;
+          }).join("")
+        }</ul>`
+      : "";
 
     el.innerHTML = `
       <div class="task-result__title">${icon} ${esc(data.message)}</div>
@@ -487,7 +103,555 @@
     const el = $(`#${elId}`);
     el.style.display = "block";
     el.className = "task-result task-result--fail";
-    el.innerHTML = `<div class="task-result__title">✗ Error</div><div class="task-result__detail">${esc(message)}</div>`;
+    el.innerHTML = `<div class="task-result__title">ERR Error</div><div class="task-result__detail">${esc(message)}</div>`;
   }
 
+  function updateContactsMeta(data) {
+    $("#contacts-meta-count").textContent = String(data.stored_contact_count || 0);
+    $("#contacts-meta-status").textContent = data.last_sync_status || "Never synced";
+    $("#contacts-meta-time").textContent = data.last_sync_at ? formatTimestamp(data.last_sync_at) : "No stored sync yet";
+  }
+
+  function renderContacts(data) {
+    $("#contacts-block").style.display = "block";
+    $("#contacts-count-badge").textContent = `${data.stored_contact_count || data.contact_count} stored`;
+    $("#contacts-tbody").innerHTML = (data.contacts || []).map((c, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${c.avatar_url ? `<img src="${c.avatar_url}" class="contact-avatar" alt="" />` : "-"}</td>
+        <td class="contact-name">${esc(c.name)}</td>
+        <td>${c.last_message ? esc(c.last_message) : "-"}</td>
+        <td>${c.unread ? '<span class="unread-dot"></span>' : "-"}</td>
+      </tr>
+    `).join("");
+  }
+
+  async function loadStoredContacts() {
+    try {
+      const res = await fetch("/api/contacts");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed");
+      updateContactsMeta(data);
+      if (data.contacts && data.contacts.length > 0) {
+        renderContacts(data);
+        setContactsStatus(data.last_sync_status === "partial" ? "partial" : "success", data.message || `Loaded ${data.contact_count} stored contact(s).`);
+      } else {
+        $("#contacts-block").style.display = "none";
+        setContactsStatus("empty", data.message || "No stored contacts yet. Run a live sync to populate the contact store.");
+      }
+    } catch (err) {
+      $("#contacts-block").style.display = "none";
+      setContactsStatus("error", err.message);
+      log(`Stored contacts load error: ${err.message}`, "error");
+    }
+  }
+
+  function getCampaignFilters() {
+    return {
+      search: $("#campaign-search").value.trim() || null,
+      unread_only: $("#campaign-unread-only").checked,
+      identity_source: $("#campaign-identity-source").value,
+      sort_by: $("#campaign-sort-by").value,
+      sort_order: $("#campaign-sort-order").value,
+      selected_ids: [],
+    };
+  }
+
+  function buildContactsQuery(filters) {
+    const params = new URLSearchParams();
+    if (filters.search) params.set("search", filters.search);
+    if (filters.unread_only) params.set("unread_only", "true");
+    if (filters.identity_source && filters.identity_source !== "all") params.set("identity_source", filters.identity_source);
+    if (filters.sort_by) params.set("sort_by", filters.sort_by);
+    if (filters.sort_order) params.set("sort_order", filters.sort_order);
+    if (filters.selected_ids && filters.selected_ids.length > 0) params.set("selected_ids", filters.selected_ids.join(","));
+    return params.toString();
+  }
+
+  async function previewCampaignMatches() {
+    const filters = getCampaignFilters();
+    const query = buildContactsQuery(filters);
+    const res = await fetch(`/api/contacts${query ? `?${query}` : ""}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    lastCampaignPreview = { filters, contacts: data.contacts || [], storedContactCount: data.stored_contact_count || 0 };
+    renderCampaignPreview(lastCampaignPreview.contacts);
+    return lastCampaignPreview;
+  }
+
+  function renderCampaignPreview(contacts) {
+    const preview = $("#campaign-preview");
+    const list = $("#campaign-preview-list");
+    const count = $("#campaign-preview-count");
+    preview.style.display = "block";
+    count.textContent = `${contacts.length} match(es)`;
+    if (!contacts.length) {
+      list.innerHTML = '<p class="field-hint">No contacts matched the current campaign filters.</p>';
+      return;
+    }
+    list.innerHTML = contacts.slice(0, 20).map((contact) => `
+      <div class="campaign-contact">
+        <div class="campaign-contact__row">
+          <div class="campaign-contact__meta">
+            <span class="campaign-contact__name">${esc(contact.name)}</span>
+            <span class="campaign-contact__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
+          </div>
+          <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : ""}">${contact.unread ? "Unread" : "Seen"}</span>
+        </div>
+      </div>
+    `).join("");
+    if (contacts.length > 20) {
+      list.insertAdjacentHTML("beforeend", `<p class="field-hint">Showing the first 20 contacts out of ${contacts.length} matched contacts.</p>`);
+    }
+  }
+
+  async function loadCampaignHistory() {
+    try {
+      const res = await fetch("/api/campaigns");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed");
+      const list = $("#campaign-history-list");
+      if (!data.campaigns || data.campaigns.length === 0) {
+        list.innerHTML = '<p class="field-hint">No campaigns yet.</p>';
+        return;
+      }
+      list.innerHTML = data.campaigns.map((campaign) => `
+        <div class="campaign-history__item">
+          <div class="campaign-history__row">
+            <div class="campaign-history__meta">
+              <span class="campaign-history__name">${esc(campaign.name)}</span>
+              <span class="campaign-history__sub">${esc(campaign.status)} | ${campaign.matched_count} matched | ${formatTimestamp(campaign.created_at)}</span>
+            </div>
+            <span class="campaign-pill ${campaign.failed_count > 0 ? "campaign-pill--warn" : "campaign-pill--ok"}">${campaign.sent_count}/${campaign.matched_count}</span>
+          </div>
+        </div>
+      `).join("");
+    } catch (err) {
+      log(`Campaign history load error: ${err.message}`, "error");
+    }
+  }
+
+  async function createCampaignDraft() {
+    const name = $("#campaign-name").value.trim();
+    const message = $("#msg-content").value.trim();
+    if (!name) throw new Error("Campaign name is required.");
+    if (!message) throw new Error("Campaign message cannot be empty.");
+    const preview = await previewCampaignMatches();
+    const res = await fetch("/api/campaigns", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        message,
+        filters: preview.filters,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    await loadCampaignHistory();
+    return data;
+  }
+
+  async function executeCampaignDraft() {
+    const campaignResult = await createCampaignDraft();
+    const delayMin = parseFloat($("#msg-delay-min").value) || 15;
+    const delayMax = parseFloat($("#msg-delay-max").value) || 30;
+    const campaignId = campaignResult.campaign.campaign_id;
+    const res = await fetch(`/api/campaigns/${campaignId}/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delay_min: delayMin, delay_max: delayMax }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    await loadCampaignHistory();
+    return data;
+  }
+
+  function setMessageMode(mode) {
+    const manual = mode === "manual";
+    $("#message-manual-mode").style.display = manual ? "block" : "none";
+    $("#message-campaign-mode").style.display = manual ? "none" : "block";
+    $("#manual-message-actions").style.display = manual ? "flex" : "none";
+  }
+
+  function bindNavigation() {
+    $$(".nav-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        $$(".nav-item").forEach((item) => item.classList.remove("nav-item--active"));
+        btn.classList.add("nav-item--active");
+        const target = btn.dataset.module;
+        $$(".module").forEach((m) => {
+          m.style.display = m.id === `mod-${target}` ? "block" : "none";
+        });
+        if (target === "contacts") loadStoredContacts();
+        if (target === "messaging") loadCampaignHistory();
+      });
+    });
+  }
+
+  function bindLogin() {
+    const btnLoginStart = $("#btn-login-start");
+    const btnLoginStop = $("#btn-login-stop");
+    const loginStateIcon = $("#login-state-icon");
+    const loginStateText = $("#login-state-text");
+    const loginStateDetail = $("#login-state-detail");
+    const loginInfo = $("#login-info");
+    const loginName = $("#login-name");
+
+    btnLoginStart.addEventListener("click", async () => {
+      btnLoginStart.disabled = true;
+      btnLoginStop.disabled = false;
+      loginStateText.textContent = "Starting browser...";
+      loginStateDetail.textContent = "Please wait...";
+      loginStateIcon.className = "login-state login-state--waiting";
+      log("Starting login browser...");
+      try {
+        const res = await fetch("/api/login/start", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed");
+        loginStateText.textContent = "Waiting for login";
+        loginStateDetail.textContent = "Scan QR code or enter phone number in the browser window.";
+        log("Browser opened - waiting for QR/phone login.");
+        startLoginPolling({ btnLoginStart, btnLoginStop, loginStateIcon, loginStateText, loginStateDetail, loginInfo, loginName });
+      } catch (err) {
+        loginStateText.textContent = "Error";
+        loginStateDetail.textContent = err.message;
+        loginStateIcon.className = "login-state login-state--err";
+        btnLoginStart.disabled = false;
+        log(err.message, "error");
+      }
+    });
+
+    btnLoginStop.addEventListener("click", async () => {
+      stopLoginPolling();
+      try { await fetch("/api/login/stop", { method: "POST" }); } catch {}
+      btnLoginStart.disabled = false;
+      btnLoginStop.disabled = true;
+      loginStateText.textContent = "Not connected";
+      loginStateDetail.textContent = 'Click "Start Login" to begin.';
+      loginStateIcon.className = "login-state";
+      loginInfo.style.display = "none";
+      log("Login browser closed.");
+    });
+  }
+
+  function startLoginPolling(ui) {
+    stopLoginPolling();
+    loginPollInterval = setInterval(async () => {
+      try {
+        const res = await fetch("/api/login/status");
+        const data = await res.json();
+        if (data.state === "authenticated") {
+          stopLoginPolling();
+          ui.loginStateText.textContent = "Authenticated";
+          ui.loginStateDetail.textContent = data.profile_name ? `Logged in as: ${data.profile_name}` : "Session is active.";
+          ui.loginStateIcon.className = "login-state login-state--ok";
+          ui.loginStateIcon.innerHTML = '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2"><circle cx="24" cy="24" r="20"/><path d="M14 24l6 6 14-14" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+          ui.btnLoginStart.disabled = true;
+          if (data.profile_name) {
+            ui.loginInfo.style.display = "flex";
+            ui.loginName.textContent = data.profile_name;
+          }
+          log(`Authenticated as: ${data.profile_name || "Unknown"}`, "success");
+        } else if (data.state === "error" || data.state === "expired") {
+          stopLoginPolling();
+          ui.loginStateText.textContent = data.state === "expired" ? "Session Expired" : "Error";
+          ui.loginStateDetail.textContent = data.message;
+          ui.loginStateIcon.className = "login-state login-state--err";
+          ui.btnLoginStart.disabled = false;
+          log(data.message, "error");
+        } else if (data.state === "idle") {
+          stopLoginPolling();
+          ui.loginStateText.textContent = "Not connected";
+          ui.loginStateDetail.textContent = data.message;
+          ui.loginStateIcon.className = "login-state";
+          ui.btnLoginStart.disabled = false;
+          ui.btnLoginStop.disabled = true;
+        }
+      } catch {}
+    }, 2500);
+  }
+
+  function stopLoginPolling() {
+    if (loginPollInterval) {
+      clearInterval(loginPollInterval);
+      loginPollInterval = null;
+    }
+  }
+
+  function bindMessaging() {
+    $("#btn-msg-send").addEventListener("click", async () => {
+      const raw = $("#msg-targets").value.trim();
+      const message = $("#msg-content").value.trim();
+      if (!raw) return alert("Enter target phone numbers or names.");
+      if (!message) return alert("Enter a message.");
+
+      const targets = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+      const delayMin = parseFloat($("#msg-delay-min").value) || 15;
+      const delayMax = parseFloat($("#msg-delay-max").value) || 30;
+      const btn = $("#btn-msg-send");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-inline"></span> Sending...';
+      log(`Sending message to ${targets.length} target(s)...`);
+
+      try {
+        const res = await fetch("/api/message/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targets, message, delay_min: delayMin, delay_max: delayMax }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed");
+        showTaskResult("msg-result", data, "message");
+        log(`Messaging done: ${data.sent}/${data.total} sent, ${data.failed} failed.`, data.failed > 0 ? "error" : "success");
+      } catch (err) {
+        showTaskResultError("msg-result", err.message);
+        log(`Messaging error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Send Messages';
+      }
+    });
+
+    $("#btn-campaign-preview").addEventListener("click", async () => {
+      try {
+        const preview = await previewCampaignMatches();
+        log(`Campaign preview matched ${preview.contacts.length} contact(s).`, "success");
+      } catch (err) {
+        log(`Campaign preview error: ${err.message}`, "error");
+      }
+    });
+
+    $("#btn-campaign-save").addEventListener("click", async () => {
+      try {
+        const data = await createCampaignDraft();
+        log(data.message || `Campaign '${data.campaign.name}' saved.`, "success");
+      } catch (err) {
+        log(`Campaign save error: ${err.message}`, "error");
+      }
+    });
+
+    $("#btn-campaign-execute").addEventListener("click", async () => {
+      const btn = $("#btn-campaign-execute");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-inline"></span> Executing...';
+      try {
+        const data = await executeCampaignDraft();
+        showTaskResult("msg-result", {
+          total: data.campaign.matched_count,
+          sent: data.campaign.sent_count,
+          failed: data.campaign.failed_count,
+          results: data.campaign.results.map((item) => ({
+            target: item.target,
+            success: item.success,
+            error: item.error,
+          })),
+          message: data.message,
+        }, "message");
+        log(data.message, data.campaign.failed_count > 0 ? "error" : "success");
+      } catch (err) {
+        showTaskResultError("msg-result", err.message);
+        log(`Campaign execution error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Save + Execute';
+      }
+    });
+
+    $("#btn-campaign-refresh").addEventListener("click", () => {
+      loadCampaignHistory();
+    });
+
+    $("#toggle-message-mode").querySelectorAll(".toggle-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        $("#toggle-message-mode").querySelectorAll(".toggle-btn").forEach((item) => item.classList.remove("toggle-btn--active"));
+        btn.classList.add("toggle-btn--active");
+        setMessageMode(btn.dataset.value);
+      });
+    });
+  }
+
+  function bindFriends() {
+    $("#btn-friend-send").addEventListener("click", async () => {
+      const raw = $("#friend-phones").value.trim();
+      if (!raw) return alert("Enter phone numbers.");
+      const phoneNumbers = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+      const greeting = $("#friend-greeting").value.trim() || null;
+      const btn = $("#btn-friend-send");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-inline"></span> Sending...';
+      log(`Sending ${phoneNumbers.length} friend request(s)...`);
+      try {
+        const res = await fetch("/api/friends/add", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone_numbers: phoneNumbers, greeting_message: greeting }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed");
+        showTaskResult("friend-result", data, "friend");
+        log(`Friend requests: ${data.sent}/${data.total} sent.`, data.failed > 0 ? "error" : "success");
+      } catch (err) {
+        showTaskResultError("friend-result", err.message);
+        log(`Friend request error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Send Friend Requests';
+      }
+    });
+  }
+
+  function bindGroups() {
+    $("#btn-group-send").addEventListener("click", async () => {
+      const groupName = $("#group-name").value.trim();
+      const message = $("#group-message").value.trim();
+      if (!groupName) return alert("Enter a group name.");
+      if (!message) return alert("Enter a message.");
+      const btn = $("#btn-group-send");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-inline"></span> Sending...';
+      log(`Sending message to group "${groupName}"...`);
+      try {
+        const res = await fetch("/api/groups/message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ group_name: groupName, message }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed");
+        const el = $("#group-result");
+        el.style.display = "block";
+        if (data.success) {
+          el.className = "task-result task-result--success";
+          el.innerHTML = `<div class="task-result__title">OK Message Sent</div><div class="task-result__detail">${esc(data.message)}</div>`;
+          log(`Group message sent to "${groupName}".`, "success");
+        } else {
+          el.className = "task-result task-result--fail";
+          el.innerHTML = `<div class="task-result__title">ERR Failed</div><div class="task-result__detail">${esc(data.message)}</div>`;
+          log(`Group message failed: ${data.message}`, "error");
+        }
+      } catch (err) {
+        showTaskResultError("group-result", err.message);
+        log(`Group error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Send to Group';
+      }
+    });
+  }
+
+  function bindContacts() {
+    $("#btn-sync-contacts").addEventListener("click", async () => {
+      const btn = $("#btn-sync-contacts");
+      btn.disabled = true;
+      setContactsStatus("progress", "Live sync in progress. Stored contacts will refresh when Zalo sync completes.");
+      $("#contacts-block").style.display = "none";
+      btn.innerHTML = '<span class="spinner-inline"></span> Syncing...';
+      log("Syncing contacts...");
+      try {
+        const res = await fetch("/api/contacts/sync", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed");
+        updateContactsMeta(data);
+        if (data.sync_status === "success" && data.contacts && data.contacts.length > 0) {
+          renderContacts(data);
+          setContactsStatus("success", data.message || `Synced ${data.contact_count} contact(s).`);
+          log(`Synced ${data.contact_count} contact(s).`, "success");
+        } else if (data.sync_status === "partial" && data.contacts && data.contacts.length > 0) {
+          renderContacts(data);
+          setContactsStatus("partial", data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`);
+          log(data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`, "error");
+        } else if (data.sync_status === "empty") {
+          $("#contacts-block").style.display = "none";
+          setContactsStatus("empty", data.message || "The contact list appears to be empty.");
+          log(data.message || "No contacts found.", "success");
+        } else {
+          $("#contacts-block").style.display = "none";
+          setContactsStatus("error", data.message || "Contact sync failed.");
+          log(data.message || "Contact sync failed.", "error");
+        }
+      } catch (err) {
+        $("#contacts-block").style.display = "none";
+        setContactsStatus("error", err.message);
+        log(`Contact sync error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Sync Contacts';
+      }
+    });
+  }
+
+  async function loadSettings() {
+    try {
+      const res = await fetch("/api/settings");
+      if (!res.ok) return;
+      const s = await res.json();
+      setToggle("toggle-lang", s.language);
+      setToggle("toggle-theme", s.theme);
+      setToggle("toggle-layout", s.layout);
+      $("#proxy-toggle").checked = s.proxy_enabled;
+      $("#proxy-fields").style.display = s.proxy_enabled ? "block" : "none";
+      if (s.proxy_address) $("#proxy-address").value = s.proxy_address;
+      if (s.proxy_port) $("#proxy-port").value = s.proxy_port;
+      $("#setting-delay-min").value = s.delay_min;
+      $("#setting-delay-max").value = s.delay_max;
+    } catch {}
+  }
+
+  function bindSettings() {
+    $$(".toggle-group").forEach((group) => {
+      if (group.id === "toggle-message-mode") return;
+      group.querySelectorAll(".toggle-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          group.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("toggle-btn--active"));
+          btn.classList.add("toggle-btn--active");
+        });
+      });
+    });
+
+    $("#proxy-toggle").addEventListener("change", (e) => {
+      $("#proxy-fields").style.display = e.target.checked ? "block" : "none";
+    });
+
+    $("#btn-save-settings").addEventListener("click", async () => {
+      const settings = {
+        language: getToggle("toggle-lang"),
+        theme: getToggle("toggle-theme"),
+        layout: getToggle("toggle-layout"),
+        proxy_enabled: $("#proxy-toggle").checked,
+        proxy_address: $("#proxy-address").value || null,
+        proxy_port: parseInt($("#proxy-port").value, 10) || null,
+        delay_min: parseFloat($("#setting-delay-min").value) || 15,
+        delay_max: parseFloat($("#setting-delay-max").value) || 30,
+      };
+      try {
+        const res = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(settings),
+        });
+        if (res.ok) log("Settings saved.", "success");
+      } catch (err) {
+        log(`Settings save error: ${err.message}`, "error");
+      }
+    });
+  }
+
+  async function initialize() {
+    checkHealth();
+    bindNavigation();
+    bindLogin();
+    bindMessaging();
+    bindFriends();
+    bindGroups();
+    bindContacts();
+    bindSettings();
+    await loadSettings();
+    await loadStoredContacts();
+    await loadCampaignHistory();
+    setMessageMode("manual");
+  }
+
+  initialize();
 })();

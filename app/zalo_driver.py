@@ -42,6 +42,10 @@ USER_DATA_DIR = os.path.join(BASE_DIR, "user_data")
 AUTH_STATE_DIR = os.path.join(BASE_DIR, "auth_state")
 SYNC_DEBUG_DIR = os.path.join(BASE_DIR, "debug_sync")
 SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+SEND_DEBUG_ENABLED = (
+    os.getenv("ZALO_SEND_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    or SYNC_DEBUG_ENABLED
+)
 
 CONTACT_VIEW_SELECTORS = [
     {
@@ -637,11 +641,17 @@ class ZaloDriver:
         avatar = (raw.get("avatar_url") or "").strip().lower()
         return f"name_avatar:{name}|{avatar}"
 
+    def _contact_identity_source(self, raw: dict) -> str:
+        return "zid" if raw.get("zid") else "name_avatar"
+
     def _merge_contact_record(self, existing: dict, incoming: dict) -> dict:
+        existing["zid"] = incoming.get("zid") or existing.get("zid")
         existing["name"] = incoming.get("name") or existing.get("name")
         existing["avatar_url"] = incoming.get("avatar_url") or existing.get("avatar_url")
         existing["last_message"] = incoming.get("last_message") or existing.get("last_message")
         existing["unread"] = bool(existing.get("unread") or incoming.get("unread"))
+        existing["identity_key"] = incoming.get("identity_key") or existing.get("identity_key")
+        existing["identity_source"] = incoming.get("identity_source") or existing.get("identity_source")
         return existing
 
     def _capture_sync_debug(self, page: Page, label: str) -> list[str]:
@@ -667,6 +677,32 @@ class ZaloDriver:
             artifacts.append(html_path)
         except Exception as exc:
             logger.warning(f"Failed to capture contact sync HTML: {exc}")
+
+        return artifacts
+
+    def _capture_send_debug(self, page: Page, label: str) -> list[str]:
+        if not SEND_DEBUG_ENABLED:
+            return []
+
+        os.makedirs(SYNC_DEBUG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", label).strip("-") or "send"
+        screenshot_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.png")
+        html_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.html")
+        artifacts = []
+
+        try:
+            page.screenshot(path=screenshot_path, full_page=True)
+            artifacts.append(screenshot_path)
+        except Exception as exc:
+            logger.warning(f"Failed to capture send screenshot: {exc}")
+
+        try:
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(page.content())
+            artifacts.append(html_path)
+        except Exception as exc:
+            logger.warning(f"Failed to capture send HTML: {exc}")
 
         return artifacts
 
@@ -743,6 +779,8 @@ class ZaloDriver:
                 before_count = len(aggregate)
                 for raw_contact in snapshot.get("contacts", []):
                     key = self._build_contact_key(raw_contact)
+                    raw_contact["identity_key"] = key
+                    raw_contact["identity_source"] = self._contact_identity_source(raw_contact)
                     if key in aggregate:
                         aggregate[key] = self._merge_contact_record(aggregate[key], raw_contact)
                     else:
@@ -834,9 +872,12 @@ class ZaloDriver:
             contacts = [
                 ContactInfo(
                     name=item["name"],
+                    zid=item.get("zid"),
                     avatar_url=item.get("avatar_url"),
                     last_message=item.get("last_message"),
                     unread=bool(item.get("unread")),
+                    identity_key=item.get("identity_key"),
+                    identity_source=item.get("identity_source"),
                 )
                 for item in aggregate.values()
             ]
@@ -919,14 +960,25 @@ class ZaloDriver:
                 success, error = False, None
                 try:
                     if not self._open_search(page):
-                        raise Exception("Could not open search bar.")
+                        raise RuntimeError("search_open_failed: Could not open search bar.")
                     page.keyboard.type(target, delay=50)
                     time.sleep(2)
-                    if not self._click_search_result(page):
-                        raise Exception(f"No result for '{target}'.")
-                    time.sleep(1)
-                    if not self._type_and_send(page, message):
-                        raise Exception("Could not send message.")
+                    selected = self._select_search_result(page, expected_text=target)
+                    if not selected.get("clicked"):
+                        artifacts = self._capture_send_debug(page, f"send-search-result-not-found-{target}")
+                        suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
+                        raise RuntimeError(f"search_result_not_found: No visible result for '{target}'.{suffix}")
+                    time.sleep(1.5)
+                    active_thread_target = selected.get("text") or target
+                    if not self._confirm_active_thread(page, target, active_thread_target):
+                        artifacts = self._capture_send_debug(page, f"send-thread-not-opened-{target}")
+                        suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
+                        raise RuntimeError(f"target_thread_not_opened: Selected '{target}' but the chat thread did not open.{suffix}")
+                    sent, send_error = self._type_and_send_detailed(page, message, target=target)
+                    if not sent:
+                        artifacts = self._capture_send_debug(page, f"send-composer-not-found-{target}")
+                        suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
+                        raise RuntimeError(f"{send_error}{suffix}")
                     success = True
                     logger.info(f"Message sent to {target}")
                 except Exception as e:
@@ -1115,43 +1167,240 @@ class ZaloDriver:
             pass
         return False
 
+    def _normalize_visible_text(self, value: Optional[str]) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+    def _select_search_result(self, page: Page, expected_text: Optional[str] = None) -> dict:
+        expected = self._normalize_visible_text(expected_text)
+        return page.evaluate(
+            """
+            ({ expected }) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
+                const selectors = [
+                    '#searchResultList .conv-item',
+                    '#searchResultList [id^="friend-item-"]',
+                    '[role="listbox"] [role="option"]',
+                    '[class*="search-result"] > div',
+                    '[class*="SearchResult"] > div',
+                    '[class*="search-item"]',
+                    '[class*="SearchItem"]',
+                    '#contact-search + div [data-id]',
+                    '#contact-search ~ div [data-id]',
+                ];
+
+                const unique = [];
+                const seen = new Set();
+                for (const selector of selectors) {
+                    for (const el of document.querySelectorAll(selector)) {
+                        if (seen.has(el) || !isVisible(el) || el.closest('#FIND_FRIEND')) continue;
+                        seen.add(el);
+                        unique.push({ el, selector });
+                    }
+                }
+
+                const scored = unique.map(({ el, selector }) => {
+                    const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const normalized = normalize(text);
+                    const inSearchSurface = !!el.closest('#searchResultList, [role="listbox"], [class*="search-result"], [class*="SearchResult"], [class*="search-item"], [class*="SearchItem"]');
+                    let score = inSearchSurface ? 5 : 0;
+                    if (el.matches?.('#searchResultList .conv-item, #searchResultList [id^="friend-item-"]')) {
+                        score += 40;
+                    }
+                    if (expected) {
+                        if (normalized === expected) score += 100;
+                        else if (normalized.startsWith(expected)) score += 50;
+                        else if (normalized.includes(expected)) score += 20;
+                    } else {
+                        score += 10;
+                    }
+                    return { el, selector, text, normalized, score };
+                }).sort((a, b) => b.score - a.score);
+
+                const best = scored[0];
+                if (!best || (expected && best.score < 20)) {
+                    return { clicked: false, selector: null, text: null };
+                }
+
+                const rect = best.el.getBoundingClientRect();
+                const clickTarget = document.elementFromPoint(
+                    rect.left + Math.min(rect.width * 0.5, Math.max(rect.width - 16, 16)),
+                    rect.top + Math.min(rect.height * 0.5, Math.max(rect.height - 8, 8))
+                ) || best.el;
+
+                clickTarget.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+                clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+                clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+                clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+                best.el.click();
+                return { clicked: true, selector: best.selector, text: best.text, id: best.el.id || null };
+            }
+            """,
+            {"expected": expected},
+        )
+
     def _click_search_result(self, page: Page) -> bool:
-        for sel in ['[class*="search-result"] > div:first-child', '[class*="SearchResult"] > div:first-child',
-                    '[class*="search-item"]:first-child', '[class*="SearchItem"]:first-child',
-                    '[role="listbox"] [role="option"]:first-child']:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0:
-                    el.click()
-                    return True
-            except Exception:
-                continue
-        try:
-            items = page.locator('div[data-id]')
-            if items.count() > 0:
-                items.first.click()
+        return bool(self._select_search_result(page).get("clicked"))
+
+    def _confirm_active_thread(self, page: Page, *targets: str, timeout_ms: int = 8_000) -> bool:
+        target_texts = [self._normalize_visible_text(target) for target in targets if self._normalize_visible_text(target)]
+        deadline = time.time() + max(timeout_ms / 1000, 3)
+
+        while time.time() < deadline:
+            if self._has_visible_locator(page, '#FIND_FRIEND, [role="dialog"], [class*="modal"]'):
+                return False
+
+            thread = page.evaluate(
+                """
+                () => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const headerSelectors = [
+                        '#container header',
+                        '#container [class*="chat-header"]',
+                        '#container [class*="ChatHeader"]',
+                        '#container [class*="conversation-header"]',
+                        '#container [class*="ConversationHeader"]',
+                        '#container [class*="header"] [class*="title"]',
+                    ];
+                    const headerTexts = [];
+                    for (const selector of headerSelectors) {
+                        for (const el of document.querySelectorAll(selector)) {
+                            if (!isVisible(el)) continue;
+                            const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (text) headerTexts.push(text);
+                        }
+                    }
+
+                    const composerSelectors = [
+                        '#chatTextInput',
+                        '[data-testid="message-input"]',
+                        '[class*="chat-input"] div[contenteditable="true"]',
+                        '[class*="ChatInput"] div[contenteditable="true"]',
+                        'footer div[contenteditable="true"]',
+                        'div[role="textbox"]',
+                    ];
+                    let composerVisible = false;
+                    for (const selector of composerSelectors) {
+                        for (const el of document.querySelectorAll(selector)) {
+                            if (isVisible(el)) {
+                                composerVisible = true;
+                                break;
+                            }
+                        }
+                        if (composerVisible) break;
+                    }
+
+                    return { headerTexts, composerVisible };
+                }
+                """
+            )
+
+            header_texts = [self._normalize_visible_text(item) for item in thread.get("headerTexts", [])]
+            if any(target_text in header for target_text in target_texts for header in header_texts):
                 return True
-        except Exception:
-            pass
+
+            time.sleep(0.5)
+
         return False
 
-    def _type_and_send(self, page: Page, message: str) -> bool:
-        for sel in ['[data-testid="message-input"]', 'div[contenteditable="true"]',
-                    '#chatTextInput', '[class*="chat-input"] div[contenteditable]',
-                    '[class*="ChatInput"] div[contenteditable]', 'div[role="textbox"]']:
+    def _locate_message_composer(self, page: Page):
+        return page.evaluate(
+            """
+            () => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const paneSelectors = [
+                    '#container main',
+                    '#container [class*="chat-box"]',
+                    '#container [class*="ChatBox"]',
+                    '#container [class*="conversation"]',
+                    '#container [class*="Conversation"]',
+                    '#container section',
+                ];
+                const composerSelectors = [
+                    '#chatTextInput',
+                    '[data-testid="message-input"]',
+                    '[class*="chat-input"] div[contenteditable="true"]',
+                    '[class*="ChatInput"] div[contenteditable="true"]',
+                    'footer div[contenteditable="true"]',
+                    'div[role="textbox"]',
+                    'div[contenteditable="true"]',
+                ];
+
+                const panes = [];
+                for (const selector of paneSelectors) {
+                    for (const el of document.querySelectorAll(selector)) {
+                        if (!isVisible(el)) continue;
+                        panes.push(el);
+                    }
+                }
+
+                const byArea = panes.sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return (br.width * br.height) - (ar.width * ar.height);
+                });
+
+                for (const pane of byArea) {
+                    for (const selector of composerSelectors) {
+                        const match = pane.matches?.(selector) ? pane : pane.querySelector(selector);
+                        if (match && isVisible(match)) {
+                            match.setAttribute('data-mmbzalo-message-composer', '1');
+                            return {
+                                selector,
+                                composerSelector: '[data-mmbzalo-message-composer="1"]',
+                            };
+                        }
+                    }
+                }
+
+                return null;
+            }
+            """
+        )
+
+    def _type_and_send_detailed(self, page: Page, message: str, target: Optional[str] = None) -> tuple[bool, Optional[str]]:
+        composer = self._locate_message_composer(page)
+        if not composer:
+            return False, "message_composer_not_found: Could not locate the active message composer."
+
+        try:
+            el = page.locator(composer["composerSelector"]).first
+            if el.count() == 0 or not el.is_visible():
+                return False, "message_composer_not_found: Composer candidate was not visible."
+
+            el.click()
             try:
-                el = page.locator(sel).first
-                if el.count() > 0:
-                    el.click()
-                    el.fill("")
-                    page.keyboard.type(message, delay=30)
-                    time.sleep(0.5)
-                    page.keyboard.press("Enter")
-                    time.sleep(1)
-                    return True
+                el.fill("")
             except Exception:
-                continue
-        return False
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+            page.keyboard.type(message, delay=30)
+            time.sleep(0.5)
+            page.keyboard.press("Enter")
+            time.sleep(1)
+            return True, None
+        except Exception as exc:
+            logger.warning(f"Message submit failed for {target or 'target'}: {exc}")
+            return False, "message_submit_failed: The composer was found, but submitting the message failed."
+
+    def _type_and_send(self, page: Page, message: str) -> bool:
+        sent, _ = self._type_and_send_detailed(page, message)
+        return sent
 
 
 # ═══════════════════════════════════════════════════════════════
