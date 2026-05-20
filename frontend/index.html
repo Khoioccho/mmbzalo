@@ -3,21 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MMBZalo — Automation Tool</title>
-  <meta name="description" content="Zalo automation tool — messaging, friend requests, groups, and contact management." />
+  <title>MMBZalo - Automation Tool</title>
+  <meta name="description" content="Zalo automation tool - messaging, friend requests, groups, and contact management." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260520-manual-picker-1" />
 </head>
 <body>
-  <!-- Ambient background -->
   <div class="bg-grid"></div>
   <div class="bg-glow bg-glow--1"></div>
   <div class="bg-glow bg-glow--2"></div>
 
   <div class="app">
-    <!-- ═══ Header ═══ -->
     <header class="header" id="app-header">
       <div class="header__brand">
         <div class="header__logo">
@@ -31,7 +29,7 @@
       <div class="header__right">
         <div class="header__status" id="health-badge">
           <span class="status-dot"></span>
-          <span>Checking…</span>
+          <span>Checking...</span>
         </div>
         <div class="header__login-info" id="login-info" style="display:none;">
           <span class="login-avatar" id="login-avatar"></span>
@@ -40,11 +38,8 @@
       </div>
     </header>
 
-    <!-- ═══ Main Layout: Left Panel + Right Panel ═══ -->
     <div class="panels">
-      <!-- ─── LEFT PANEL: Core Modules ─── -->
       <div class="panel panel--left">
-        <!-- Navigation Tabs -->
         <nav class="module-nav" id="module-nav">
           <button class="nav-item nav-item--active" data-module="login" id="nav-login">
             <svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-7 9a7 7 0 1 1 14 0H3z"/></svg>
@@ -68,10 +63,7 @@
           </button>
         </nav>
 
-        <!-- Module Content Area -->
         <div class="module-content">
-
-          <!-- ── LOGIN MODULE ── -->
           <section class="module" id="mod-login">
             <div class="card">
               <div class="card__header">
@@ -103,7 +95,6 @@
             </div>
           </section>
 
-          <!-- ── MESSAGING MODULE ── -->
           <section class="module" id="mod-messaging" style="display:none;">
             <div class="card">
               <div class="card__header">
@@ -111,15 +102,101 @@
                   <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   Send Messages
                 </h2>
-                <p class="card__desc">Send direct messages to phone numbers or contacts from your friend list. Messages are sent with randomized delays to avoid detection.</p>
+                <p class="card__desc">Send direct messages from a pasted target list or build a filtered campaign from your stored contacts.</p>
               </div>
               <div class="card__body">
-                <label class="field-label" for="msg-targets">Target List</label>
-                <textarea id="msg-targets" class="field-textarea" rows="4" placeholder="Enter phone numbers or names, one per line&#10;0912345678&#10;0987654321&#10;Nguyễn Văn A" spellcheck="false"></textarea>
-                <p class="field-hint">One phone number or contact name per line.</p>
+                <div class="toggle-group campaign-mode-toggle" id="toggle-message-mode">
+                  <button class="toggle-btn toggle-btn--active" data-value="manual">Manual Targets</button>
+                  <button class="toggle-btn" data-value="campaign">Campaign Mode</button>
+                </div>
+
+                <div id="message-manual-mode">
+                  <label class="field-label" for="msg-targets">Target List</label>
+                  <textarea id="msg-targets" class="field-textarea" rows="4" placeholder="Enter phone numbers or names, one per line&#10;0912345678&#10;0987654321&#10;Nguyá»…n VÄƒn A" spellcheck="false"></textarea>
+                  <p class="field-hint">One phone number or contact name per line.</p>
+                  <div class="manual-picker-actions">
+                    <button class="btn btn--secondary btn--sm" id="btn-open-contact-picker" type="button">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 2a1 1 0 0 0 0 2h2a1 1 0 1 0 0-2h-2z"/><path fill-rule="evenodd" d="M5 5a2 2 0 0 1 2-2 3 3 0 0 0 3 3h2a3 3 0 0 0 3-3 2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5zm3 3a1 1 0 0 0 0 2h5a1 1 0 1 0 0-2H8zm0 4a1 1 0 1 0 0 2h5a1 1 0 1 0 0-2H8z" clip-rule="evenodd"/></svg>
+                      Choose From Contacts
+                    </button>
+                  </div>
+                </div>
+
+                <div class="campaign-builder" id="message-campaign-mode" style="display:none;">
+                  <div class="field-row">
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-name">Campaign Name</label>
+                      <input type="text" id="campaign-name" class="field-input" placeholder="April follow-up" />
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-search">Search Contacts</label>
+                      <input type="text" id="campaign-search" class="field-input" placeholder="Search by name" />
+                    </div>
+                  </div>
+                  <div class="field-row">
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-identity-source">Identity Strength</label>
+                      <select id="campaign-identity-source" class="field-input">
+                        <option value="all">All contacts</option>
+                        <option value="zid">Strong identity only</option>
+                        <option value="name_avatar">Fallback identity only</option>
+                      </select>
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-sort-by">Sort By</label>
+                      <select id="campaign-sort-by" class="field-input">
+                        <option value="name">Name</option>
+                        <option value="last_seen_at">Last seen</option>
+                      </select>
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-sort-order">Order</label>
+                      <select id="campaign-sort-order" class="field-input">
+                        <option value="asc">Ascending</option>
+                        <option value="desc">Descending</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="campaign-check">
+                    <label class="checkbox-row">
+                      <input type="checkbox" id="campaign-unread-only" />
+                      <span>Unread contacts only</span>
+                    </label>
+                  </div>
+                  <div class="actions">
+                    <button class="btn btn--secondary" id="btn-campaign-preview">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 3C5 3 1.73 7.11.46 9.11a1.59 1.59 0 0 0 0 1.78C1.73 12.89 5 17 10 17s8.27-4.11 9.54-6.11a1.59 1.59 0 0 0 0-1.78C18.27 7.11 15 3 10 3zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg>
+                      Preview Matches
+                    </button>
+                    <button class="btn btn--secondary" id="btn-campaign-save">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.414A2 2 0 0 0 17.414 6L14 2.586A2 2 0 0 0 12.586 2H4zm6 1v4H6V4h4z"/></svg>
+                      Save Campaign
+                    </button>
+                    <button class="btn btn--primary" id="btn-campaign-execute">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
+                      Save + Execute
+                    </button>
+                  </div>
+                  <div class="campaign-preview" id="campaign-preview" style="display:none;">
+                    <div class="campaign-preview__header">
+                      <span class="campaign-preview__title">Campaign Matches</span>
+                      <span class="campaign-preview__count" id="campaign-preview-count"></span>
+                    </div>
+                    <div class="campaign-preview__list" id="campaign-preview-list"></div>
+                  </div>
+                  <div class="campaign-history">
+                    <div class="campaign-preview__header">
+                      <span class="campaign-preview__title">Recent Campaigns</span>
+                      <button class="btn btn--secondary btn--sm" id="btn-campaign-refresh">Refresh</button>
+                    </div>
+                    <div class="campaign-history__list" id="campaign-history-list">
+                      <p class="field-hint">No campaigns yet.</p>
+                    </div>
+                  </div>
+                </div>
 
                 <label class="field-label" for="msg-content">Message</label>
-                <textarea id="msg-content" class="field-textarea" rows="4" placeholder="Type your message here…"></textarea>
+                <textarea id="msg-content" class="field-textarea" rows="4" placeholder="Type your message here..."></textarea>
 
                 <div class="field-row">
                   <div class="field-group">
@@ -132,20 +209,18 @@
                   </div>
                 </div>
 
-                <div class="actions">
+                <div class="actions" id="manual-message-actions">
                   <button class="btn btn--primary" id="btn-msg-send">
                     <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
                     Send Messages
                   </button>
                 </div>
 
-                <!-- Results -->
                 <div class="task-result" id="msg-result" style="display:none;"></div>
               </div>
             </div>
           </section>
 
-          <!-- ── FRIENDS MODULE ── -->
           <section class="module" id="mod-friends" style="display:none;">
             <div class="card">
               <div class="card__header">
@@ -159,23 +234,19 @@
                 <label class="field-label" for="friend-phones">Phone Numbers</label>
                 <textarea id="friend-phones" class="field-textarea" rows="4" placeholder="Enter phone numbers, one per line&#10;0912345678&#10;0987654321" spellcheck="false"></textarea>
                 <p class="field-hint">One phone number per line.</p>
-
                 <label class="field-label" for="friend-greeting">Greeting Message <span class="optional">(optional)</span></label>
                 <textarea id="friend-greeting" class="field-textarea" rows="2" placeholder="Xin chào! Mình muốn kết bạn với bạn."></textarea>
-
                 <div class="actions">
                   <button class="btn btn--primary" id="btn-friend-send">
                     <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M8 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm5-3a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-1.07 7.94A5 5 0 0 0 3 15v3h10v-3a5 5 0 0 0-.07-.06zM15 11h2v2h2v2h-2v2h-2v-2h-2v-2h2v-2z"/></svg>
                     Send Friend Requests
                   </button>
                 </div>
-
                 <div class="task-result" id="friend-result" style="display:none;"></div>
               </div>
             </div>
           </section>
 
-          <!-- ── GROUPS MODULE ── -->
           <section class="module" id="mod-groups" style="display:none;">
             <div class="card">
               <div class="card__header">
@@ -188,23 +259,19 @@
               <div class="card__body">
                 <label class="field-label" for="group-name">Group Name</label>
                 <input type="text" id="group-name" class="field-input" placeholder="Enter the group name to search for" />
-
                 <label class="field-label" for="group-message">Message</label>
-                <textarea id="group-message" class="field-textarea" rows="4" placeholder="Type the message to send in the group…"></textarea>
-
+                <textarea id="group-message" class="field-textarea" rows="4" placeholder="Type the message to send in the group..."></textarea>
                 <div class="actions">
                   <button class="btn btn--primary" id="btn-group-send">
                     <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
                     Send to Group
                   </button>
                 </div>
-
                 <div class="task-result" id="group-result" style="display:none;"></div>
               </div>
             </div>
           </section>
 
-          <!-- ── CONTACTS MODULE ── -->
           <section class="module" id="mod-contacts" style="display:none;">
             <div class="card">
               <div class="card__header">
@@ -212,9 +279,24 @@
                   <svg class="card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
                   Contact List
                 </h2>
-                <p class="card__desc">Synchronize your Zalo contacts and recent conversations.</p>
+                <p class="card__desc">Persist your Zalo friend list locally, reload it without scraping, and run live sync only when needed.</p>
               </div>
               <div class="card__body">
+                <div class="contacts-meta" id="contacts-meta">
+                  <div class="contacts-meta__item">
+                    <span class="contacts-meta__label">Stored Contacts</span>
+                    <span class="contacts-meta__value" id="contacts-meta-count">0</span>
+                  </div>
+                  <div class="contacts-meta__item">
+                    <span class="contacts-meta__label">Last Sync Status</span>
+                    <span class="contacts-meta__value" id="contacts-meta-status">Never synced</span>
+                  </div>
+                  <div class="contacts-meta__item contacts-meta__item--wide">
+                    <span class="contacts-meta__label">Last Sync Time</span>
+                    <span class="contacts-meta__value" id="contacts-meta-time">No stored sync yet</span>
+                  </div>
+                </div>
+
                 <div class="actions">
                   <button class="btn btn--primary" id="btn-sync-contacts">
                     <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.008 9.057a1 1 0 0 1 1.276.61A5.002 5.002 0 0 0 14.001 13H11a1 1 0 1 1 0-2h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-2.101a7.002 7.002 0 0 1-11.601-2.566 1 1 0 0 1 .61-1.276z" clip-rule="evenodd"/></svg>
@@ -226,7 +308,6 @@
                   Ready to sync contacts from the authenticated Zalo session.
                 </div>
 
-                <!-- Contacts table -->
                 <div class="contacts-block" id="contacts-block" style="display:none;">
                   <div class="contacts-header">
                     <h3 class="contacts-title">Contacts</h3>
@@ -250,11 +331,9 @@
               </div>
             </div>
           </section>
+        </div>
+      </div>
 
-        </div><!-- .module-content -->
-      </div><!-- .panel--left -->
-
-      <!-- ─── RIGHT PANEL: Settings ─── -->
       <div class="panel panel--right">
         <div class="card">
           <div class="card__header">
@@ -264,7 +343,6 @@
             </h2>
           </div>
           <div class="card__body settings-body">
-            <!-- Language -->
             <div class="setting-item">
               <div class="setting-info">
                 <span class="setting-label">Language</span>
@@ -275,8 +353,6 @@
                 <button class="toggle-btn" data-value="en">EN</button>
               </div>
             </div>
-
-            <!-- Theme -->
             <div class="setting-item">
               <div class="setting-info">
                 <span class="setting-label">Theme</span>
@@ -287,8 +363,6 @@
                 <button class="toggle-btn" data-value="light">Light</button>
               </div>
             </div>
-
-            <!-- Layout -->
             <div class="setting-item">
               <div class="setting-info">
                 <span class="setting-label">Layout</span>
@@ -302,7 +376,6 @@
 
             <hr class="setting-divider" />
 
-            <!-- Proxy -->
             <div class="setting-item">
               <div class="setting-info">
                 <span class="setting-label">Proxy</span>
@@ -329,7 +402,6 @@
 
             <hr class="setting-divider" />
 
-            <!-- Delay config -->
             <div class="setting-item">
               <div class="setting-info">
                 <span class="setting-label">Send Delays</span>
@@ -346,7 +418,6 @@
                 <input type="number" id="setting-delay-max" class="field-input" value="30" min="1" />
               </div>
             </div>
-
             <div class="actions" style="margin-top:16px;">
               <button class="btn btn--secondary btn--sm" id="btn-save-settings">
                 <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M16.707 5.293a1 1 0 0 1 0 1.414l-8 8a1 1 0 0 1-1.414 0l-4-4a1 1 0 0 1 1.414-1.414L8 12.586l7.293-7.293a1 1 0 0 1 1.414 0z"/></svg>
@@ -356,7 +427,6 @@
           </div>
         </div>
 
-        <!-- Activity Log -->
         <div class="card" style="margin-top:16px;">
           <div class="card__header">
             <h2 class="card__title" style="font-size:0.95rem;">
@@ -370,15 +440,35 @@
             </div>
           </div>
         </div>
-      </div><!-- .panel--right -->
-    </div><!-- .panels -->
+      </div>
+    </div>
 
-    <!-- Footer -->
     <footer class="footer">
-      <p>MMBZalo v0.2 — Zalo Automation Tool</p>
+      <p>MMBZalo v0.2 - Zalo Automation Tool</p>
     </footer>
   </div>
 
-  <script src="/static/app.js"></script>
+  <div class="picker-modal" id="contact-picker-modal" style="display:none;" aria-hidden="true">
+    <div class="picker-modal__backdrop" id="contact-picker-backdrop"></div>
+    <div class="picker-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="contact-picker-title">
+      <div class="picker-modal__header">
+        <div>
+          <h3 class="picker-modal__title" id="contact-picker-title">Choose Contacts</h3>
+          <p class="picker-modal__sub">Search your stored contacts and add names into the manual target list.</p>
+        </div>
+        <button class="picker-modal__close" id="btn-close-contact-picker" type="button" aria-label="Close contact picker">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 0 1 1.414 0L10 8.586l4.293-4.293a1 1 0 1 1 1.414 1.414L11.414 10l4.293 4.293a1 1 0 0 1-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 0 1-1.414-1.414L8.586 10 4.293 5.707a1 1 0 0 1 0-1.414z" clip-rule="evenodd"/></svg>
+        </button>
+      </div>
+      <div class="picker-modal__body">
+        <label class="field-label" for="contact-picker-search">Search Stored Contacts</label>
+        <input type="text" id="contact-picker-search" class="field-input" placeholder="Type a contact name" autocomplete="off" />
+        <div class="picker-modal__status" id="contact-picker-status">Open the picker to load stored contacts.</div>
+        <div class="picker-modal__list" id="contact-picker-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=20260520-manual-picker-1"></script>
 </body>
 </html>

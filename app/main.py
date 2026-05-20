@@ -14,8 +14,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.models import (
+    CampaignDraftPayload,
+    CampaignExecutePayload,
+    CampaignListResult,
+    CampaignOperationResult,
+    ContactQueryParams,
     LoginStatus,
     ContactListResult,
+    ContactSyncRunListResult,
     MessagePayload,
     MessageResult,
     FriendRequestPayload,
@@ -24,6 +30,7 @@ from app.models import (
     GroupResult,
     AppSettings,
 )
+from app.contact_store import contact_store
 from app.zalo_driver import get_driver
 
 logging.basicConfig(
@@ -58,6 +65,7 @@ def _save_settings():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_settings()
+    contact_store.initialize()
     logger.info("MMBZalo Automation Tool started.")
     yield
     driver = await get_driver()
@@ -142,14 +150,119 @@ async def login_stop():
 # ═════════════════════════════════════════════════════════════════
 
 @app.get("/api/contacts", response_model=ContactListResult)
-async def get_contacts():
-    """Sync and return the contact/conversation list."""
+async def get_contacts(
+    search: str | None = None,
+    unread_only: bool = False,
+    identity_source: str = "all",
+    sort_by: str = "name",
+    sort_order: str = "asc",
+    selected_ids: str | None = None,
+):
+    """Return the latest persisted contact list and sync metadata."""
+    try:
+        filters = ContactQueryParams(
+            search=search,
+            unread_only=unread_only,
+            identity_source=identity_source,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            selected_ids=[item.strip() for item in (selected_ids or "").split(",") if item.strip()],
+        )
+        return contact_store.get_contacts_result(filters)
+    except Exception as e:
+        logger.exception("Loading stored contacts failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/contacts/sync", response_model=ContactListResult)
+async def sync_contacts():
+    """Run a live Zalo sync and persist the result locally."""
     driver = await get_driver()
     try:
         result = await driver.sync_contacts()
-        return ContactListResult(**result)
+        persisted = contact_store.persist_sync_result(result)
+        return ContactListResult(**persisted.model_dump())
     except Exception as e:
         logger.exception("Contact sync failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/contacts/sync-runs", response_model=ContactSyncRunListResult)
+async def get_contact_sync_runs():
+    """Return recent persisted contact sync runs."""
+    try:
+        runs = contact_store.list_sync_runs()
+        return ContactSyncRunListResult(runs=runs, total=len(runs))
+    except Exception as e:
+        logger.exception("Loading contact sync history failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/campaigns", response_model=CampaignOperationResult)
+async def create_campaign(payload: CampaignDraftPayload):
+    """Create a local campaign draft from stored contacts."""
+    if not payload.name.strip():
+        raise HTTPException(400, "Campaign name is required.")
+    if not payload.message.strip():
+        raise HTTPException(400, "Campaign message cannot be empty.")
+    try:
+        campaign = contact_store.create_campaign(payload)
+        return CampaignOperationResult(
+            campaign=campaign,
+            message=f"Campaign '{campaign.name}' saved with {campaign.matched_count} matched contact(s).",
+        )
+    except Exception as e:
+        logger.exception("Campaign creation failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/campaigns", response_model=CampaignListResult)
+async def list_campaigns():
+    """Return recent saved campaigns."""
+    try:
+        campaigns = contact_store.list_campaigns()
+        return CampaignListResult(campaigns=campaigns, total=len(campaigns))
+    except Exception as e:
+        logger.exception("Campaign list failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/campaigns/{campaign_id}/execute", response_model=CampaignOperationResult)
+async def execute_campaign(campaign_id: int, payload: CampaignExecutePayload):
+    """Execute a saved campaign through the existing messaging driver."""
+    if payload.delay_min < 0 or payload.delay_max < 0:
+        raise HTTPException(400, "Delay values must be non-negative.")
+    if payload.delay_max < payload.delay_min:
+        raise HTTPException(400, "Max delay must be greater than or equal to min delay.")
+
+    driver = await get_driver()
+    try:
+        prepared = contact_store.prepare_campaign_execution(campaign_id)
+        campaign = prepared["campaign"]
+        targets = prepared["targets"]
+        if not targets:
+            raise HTTPException(400, "Campaign has no matched contacts to execute.")
+        send_result = await driver.send_messages(
+            targets=targets,
+            message=campaign.message,
+            delay_min=payload.delay_min,
+            delay_max=payload.delay_max,
+        )
+        updated_campaign = contact_store.finalize_campaign_execution(
+            campaign_id=campaign_id,
+            matched_contacts=campaign.matched_contacts,
+            send_result=send_result,
+        )
+        return CampaignOperationResult(
+            campaign=updated_campaign,
+            message=f"Campaign '{updated_campaign.name}' executed: {updated_campaign.sent_count} sent, {updated_campaign.failed_count} failed.",
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        logger.exception("Campaign execution failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
