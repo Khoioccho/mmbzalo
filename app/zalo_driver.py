@@ -26,6 +26,7 @@ from typing import Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
+from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
 from app.models import (
     LoginState,
     ContactInfo,
@@ -564,14 +565,25 @@ class ZaloDriver:
 
                 const nodes = Array.from(container.querySelectorAll(itemSelector));
                 const contacts = nodes.map((node) => {
-                    const textCandidates = Array.from(
-                        node.querySelectorAll('span, p, strong, h1, h2, h3, h4, h5, h6, div')
-                    )
+                    const collectTexts = (selector) => Array.from(node.querySelectorAll(selector))
                         .map((el) => (el.textContent || '').trim())
                         .filter(Boolean)
                         .filter((value) => value.length < 140);
-                    const name = textCandidates[0] || (node.textContent || '').trim().split('\\n')[0] || '';
-                    const lastMessage = textCandidates.length > 1 ? textCandidates[1] : null;
+                    const textCandidates = collectTexts('span, p, strong, h1, h2, h3, h4, h5, h6');
+                    if (!textCandidates.length) {
+                        textCandidates.push(...collectTexts('div'));
+                    }
+                    const initialsOnly = (value) => {
+                        const compact = (value || '').replace(/\\s+/g, '');
+                        return compact.length > 0
+                            && compact.length <= 4
+                            && /^[A-Z]+$/.test(compact);
+                    };
+                    const nameIndex = textCandidates.findIndex((value) => !initialsOnly(value));
+                    const name = (nameIndex >= 0 ? textCandidates[nameIndex] : null)
+                        || (node.textContent || '').trim().split('\\n')[0]
+                        || '';
+                    const lastMessage = textCandidates.find((value, index) => index !== nameIndex && !initialsOnly(value)) || null;
                     const imgEl = node.querySelector('img');
                     const unreadEl = node.querySelector('[class*="badge"], [class*="unread"], [aria-label*="unread"]');
                     return {
@@ -637,7 +649,7 @@ class ZaloDriver:
     def _build_contact_key(self, raw: dict) -> str:
         if raw.get("zid"):
             return f"id:{raw['zid']}"
-        name = re.sub(r"\s+", " ", (raw.get("name") or "").strip().lower())
+        name = normalize_contact_name(raw.get("name") or "").lower()
         avatar = (raw.get("avatar_url") or "").strip().lower()
         return f"name_avatar:{name}|{avatar}"
 
@@ -646,7 +658,7 @@ class ZaloDriver:
 
     def _merge_contact_record(self, existing: dict, incoming: dict) -> dict:
         existing["zid"] = incoming.get("zid") or existing.get("zid")
-        existing["name"] = incoming.get("name") or existing.get("name")
+        existing["name"] = normalize_contact_name(incoming.get("name") or "") or existing.get("name")
         existing["avatar_url"] = incoming.get("avatar_url") or existing.get("avatar_url")
         existing["last_message"] = incoming.get("last_message") or existing.get("last_message")
         existing["unread"] = bool(existing.get("unread") or incoming.get("unread"))
@@ -778,6 +790,7 @@ class ZaloDriver:
 
                 before_count = len(aggregate)
                 for raw_contact in snapshot.get("contacts", []):
+                    raw_contact["name"] = choose_best_contact_name([raw_contact.get("name") or ""], fallback=raw_contact.get("name") or "")
                     key = self._build_contact_key(raw_contact)
                     raw_contact["identity_key"] = key
                     raw_contact["identity_source"] = self._contact_identity_source(raw_contact)
@@ -871,7 +884,7 @@ class ZaloDriver:
 
             contacts = [
                 ContactInfo(
-                    name=item["name"],
+                    name=normalize_contact_name(item["name"]) or item["name"],
                     zid=item.get("zid"),
                     avatar_url=item.get("avatar_url"),
                     last_message=item.get("last_message"),
@@ -959,22 +972,23 @@ class ZaloDriver:
                 logger.info(f"Messaging {i+1}/{len(targets)}: {target}")
                 success, error = False, None
                 try:
+                    search_target = normalize_contact_name(target) or target
                     if not self._open_search(page):
                         raise RuntimeError("search_open_failed: Could not open search bar.")
-                    page.keyboard.type(target, delay=50)
+                    page.keyboard.type(search_target, delay=50)
                     time.sleep(2)
-                    selected = self._select_search_result(page, expected_text=target)
+                    selected = self._select_search_result(page, expected_text=search_target)
                     if not selected.get("clicked"):
                         artifacts = self._capture_send_debug(page, f"send-search-result-not-found-{target}")
                         suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
                         raise RuntimeError(f"search_result_not_found: No visible result for '{target}'.{suffix}")
                     time.sleep(1.5)
-                    active_thread_target = selected.get("text") or target
-                    if not self._confirm_active_thread(page, target, active_thread_target):
+                    active_thread_target = selected.get("text") or search_target
+                    if not self._confirm_active_thread(page, search_target, target, active_thread_target):
                         artifacts = self._capture_send_debug(page, f"send-thread-not-opened-{target}")
                         suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
                         raise RuntimeError(f"target_thread_not_opened: Selected '{target}' but the chat thread did not open.{suffix}")
-                    sent, send_error = self._type_and_send_detailed(page, message, target=target)
+                    sent, send_error = self._type_and_send_detailed(page, message, target=search_target)
                     if not sent:
                         artifacts = self._capture_send_debug(page, f"send-composer-not-found-{target}")
                         suffix = f" debug={', '.join(artifacts)}" if artifacts else ""

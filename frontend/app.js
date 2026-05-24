@@ -10,12 +10,17 @@
   const $$ = (sel) => document.querySelectorAll(sel);
   let loginPollInterval = null;
   let lastCampaignPreview = null;
+  let campaignHistoryCache = [];
   const manualPickerState = {
     contacts: [],
     filtered: [],
     loaded: false,
     loading: false,
     error: "",
+  };
+  const campaignSelectionState = {
+    selectedContacts: [],
+    previewContacts: [],
   };
 
   async function checkHealth() {
@@ -292,7 +297,7 @@
     }
   }
 
-  function getCampaignFilters() {
+  function getCampaignDiscoveryFilters() {
     return {
       search: $("#campaign-search").value.trim() || null,
       unread_only: $("#campaign-unread-only").checked,
@@ -301,6 +306,76 @@
       sort_order: $("#campaign-sort-order").value,
       selected_ids: [],
     };
+  }
+
+  function getCampaignFilters() {
+    return {
+      ...getCampaignDiscoveryFilters(),
+      selected_ids: campaignSelectionState.selectedContacts.map((contact) => contact.identity_key).filter(Boolean),
+    };
+  }
+
+  function setCampaignFilters(filters = {}) {
+    $("#campaign-search").value = filters.search || "";
+    $("#campaign-unread-only").checked = Boolean(filters.unread_only);
+    $("#campaign-identity-source").value = filters.identity_source || "all";
+    $("#campaign-sort-by").value = filters.sort_by || "name";
+    $("#campaign-sort-order").value = filters.sort_order || "asc";
+  }
+
+  function addCampaignContacts(contacts) {
+    const existing = new Map(campaignSelectionState.selectedContacts.map((contact) => [contact.identity_key, contact]));
+    let added = 0;
+    for (const contact of contacts) {
+      if (!contact || !contact.identity_key || existing.has(contact.identity_key)) continue;
+      existing.set(contact.identity_key, contact);
+      added += 1;
+    }
+    campaignSelectionState.selectedContacts = Array.from(existing.values());
+    renderCampaignSelection();
+    renderCampaignPreview(campaignSelectionState.previewContacts);
+    return added;
+  }
+
+  function removeCampaignContact(identityKey) {
+    campaignSelectionState.selectedContacts = campaignSelectionState.selectedContacts.filter(
+      (contact) => contact.identity_key !== identityKey,
+    );
+    renderCampaignSelection();
+    renderCampaignPreview(campaignSelectionState.previewContacts);
+  }
+
+  function clearCampaignSelection() {
+    campaignSelectionState.selectedContacts = [];
+    renderCampaignSelection();
+    renderCampaignPreview(campaignSelectionState.previewContacts);
+  }
+
+  function renderCampaignSelection() {
+    const list = $("#campaign-selection-list");
+    const count = $("#campaign-selected-count");
+    const contacts = campaignSelectionState.selectedContacts;
+    count.textContent = `${contacts.length} selected`;
+
+    if (!contacts.length) {
+      list.innerHTML = '<p class="field-hint">No campaign recipients selected yet. Preview matches, then add the contacts you want.</p>';
+      return;
+    }
+
+    list.innerHTML = contacts.map((contact) => `
+      <div class="campaign-selection__item">
+        <div class="campaign-selection__row">
+          <div class="campaign-selection__meta">
+            <span class="campaign-selection__name">${esc(contact.name)}</span>
+            <span class="campaign-selection__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
+          </div>
+          <div class="campaign-selection__actions-inline">
+            <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : "campaign-pill--muted"}">${contact.unread ? "Unread" : "Seen"}</span>
+            <button class="btn btn--secondary btn--sm" type="button" data-campaign-remove="${esc(contact.identity_key)}">Remove</button>
+          </div>
+        </div>
+      </div>
+    `).join("");
   }
 
   function buildContactsQuery(filters) {
@@ -315,13 +390,14 @@
   }
 
   async function previewCampaignMatches() {
-    const filters = getCampaignFilters();
+    const filters = getCampaignDiscoveryFilters();
     const query = buildContactsQuery(filters);
     const res = await fetch(`/api/contacts${query ? `?${query}` : ""}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed");
-    lastCampaignPreview = { filters, contacts: data.contacts || [], storedContactCount: data.stored_contact_count || 0 };
-    renderCampaignPreview(lastCampaignPreview.contacts);
+    campaignSelectionState.previewContacts = data.contacts || [];
+    lastCampaignPreview = { filters, contacts: campaignSelectionState.previewContacts, storedContactCount: data.stored_contact_count || 0 };
+    renderCampaignPreview(campaignSelectionState.previewContacts);
     return lastCampaignPreview;
   }
 
@@ -329,6 +405,7 @@
     const preview = $("#campaign-preview");
     const list = $("#campaign-preview-list");
     const count = $("#campaign-preview-count");
+    const selectedIds = new Set(campaignSelectionState.selectedContacts.map((contact) => contact.identity_key));
     preview.style.display = "block";
     count.textContent = `${contacts.length} match(es)`;
     if (!contacts.length) {
@@ -342,7 +419,10 @@
             <span class="campaign-contact__name">${esc(contact.name)}</span>
             <span class="campaign-contact__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
           </div>
-          <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : ""}">${contact.unread ? "Unread" : "Seen"}</span>
+          <div class="campaign-contact__actions">
+            <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : "campaign-pill--muted"}">${contact.unread ? "Unread" : "Seen"}</span>
+            <button class="btn btn--secondary btn--sm" type="button" data-campaign-add="${esc(contact.identity_key)}">${selectedIds.has(contact.identity_key) ? "Added" : "Add"}</button>
+          </div>
         </div>
       </div>
     `).join("");
@@ -356,19 +436,23 @@
       const res = await fetch("/api/campaigns");
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed");
+      campaignHistoryCache = data.campaigns || [];
       const list = $("#campaign-history-list");
-      if (!data.campaigns || data.campaigns.length === 0) {
+      if (!campaignHistoryCache.length) {
         list.innerHTML = '<p class="field-hint">No campaigns yet.</p>';
         return;
       }
-      list.innerHTML = data.campaigns.map((campaign) => `
+      list.innerHTML = campaignHistoryCache.map((campaign) => `
         <div class="campaign-history__item">
           <div class="campaign-history__row">
             <div class="campaign-history__meta">
               <span class="campaign-history__name">${esc(campaign.name)}</span>
-              <span class="campaign-history__sub">${esc(campaign.status)} | ${campaign.matched_count} matched | ${formatTimestamp(campaign.created_at)}</span>
+              <span class="campaign-history__sub">${esc(campaign.status)} | ${campaign.selected_contact_ids?.length || campaign.matched_count} selected | ${formatTimestamp(campaign.created_at)}</span>
             </div>
-            <span class="campaign-pill ${campaign.failed_count > 0 ? "campaign-pill--warn" : "campaign-pill--ok"}">${campaign.sent_count}/${campaign.matched_count}</span>
+            <div class="campaign-history__actions">
+              <span class="campaign-pill ${campaign.failed_count > 0 ? "campaign-pill--warn" : "campaign-pill--ok"}">${campaign.sent_count}/${campaign.matched_count}</span>
+              <button class="btn btn--secondary btn--sm" type="button" data-campaign-load="${campaign.campaign_id}">Load</button>
+            </div>
           </div>
         </div>
       `).join("");
@@ -377,19 +461,39 @@
     }
   }
 
+  function loadCampaignIntoBuilder(campaignId) {
+    const campaign = campaignHistoryCache.find((item) => Number(item.campaign_id) === Number(campaignId));
+    if (!campaign) {
+      log("Campaign not found in history.", "error");
+      return;
+    }
+
+    $("#campaign-name").value = campaign.name || "";
+    $("#msg-content").value = campaign.message || "";
+    setCampaignFilters(campaign.filters || {});
+    campaignSelectionState.selectedContacts = (campaign.matched_contacts || []).slice();
+    renderCampaignSelection();
+    campaignSelectionState.previewContacts = [];
+    $("#campaign-preview").style.display = "none";
+    log(`Loaded campaign '${campaign.name}' into the builder.`, "success");
+  }
+
   async function createCampaignDraft() {
     const name = $("#campaign-name").value.trim();
     const message = $("#msg-content").value.trim();
     if (!name) throw new Error("Campaign name is required.");
     if (!message) throw new Error("Campaign message cannot be empty.");
-    const preview = await previewCampaignMatches();
+    if (!campaignSelectionState.selectedContacts.length) {
+      throw new Error("Select at least one campaign recipient before saving.");
+    }
+    const filters = getCampaignFilters();
     const res = await fetch("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name,
         message,
-        filters: preview.filters,
+        filters,
       }),
     });
     const data = await res.json();
@@ -531,6 +635,14 @@
       openManualPicker();
     });
 
+    $("#btn-clear-msg-targets").addEventListener("click", () => {
+      const textarea = $("#msg-targets");
+      if (!textarea.value.trim()) return;
+      textarea.value = "";
+      renderManualPickerList();
+      log("Cleared manual target list.");
+    });
+
     $("#btn-close-contact-picker").addEventListener("click", () => {
       closeManualPicker();
     });
@@ -561,6 +673,54 @@
       if (event.key === "Escape" && $("#contact-picker-modal").style.display !== "none") {
         closeManualPicker();
       }
+    });
+
+    $("#campaign-preview-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-campaign-add]");
+      if (!btn) return;
+      const identityKey = btn.dataset.campaignAdd;
+      const contact = campaignSelectionState.previewContacts.find((item) => item.identity_key === identityKey);
+      if (!contact) return;
+      const added = addCampaignContacts([contact]);
+      log(
+        added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`,
+        added ? "success" : ""
+      );
+    });
+
+    $("#campaign-selection-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-campaign-remove]");
+      if (!btn) return;
+      const identityKey = btn.dataset.campaignRemove;
+      const contact = campaignSelectionState.selectedContacts.find((item) => item.identity_key === identityKey);
+      removeCampaignContact(identityKey);
+      if (contact) {
+        log(`Removed '${contact.name}' from campaign recipients.`);
+      }
+    });
+
+    $("#campaign-history-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-campaign-load]");
+      if (!btn) return;
+      loadCampaignIntoBuilder(btn.dataset.campaignLoad);
+    });
+
+    $("#btn-campaign-clear-selection").addEventListener("click", () => {
+      if (!campaignSelectionState.selectedContacts.length) return;
+      clearCampaignSelection();
+      log("Cleared campaign recipient selection.");
+    });
+
+    $("#btn-campaign-add-all").addEventListener("click", () => {
+      if (!campaignSelectionState.previewContacts.length) {
+        log("Preview matches first, then add contacts to the campaign.", "error");
+        return;
+      }
+      const added = addCampaignContacts(campaignSelectionState.previewContacts);
+      log(
+        added > 0 ? `Added ${added} contact(s) to campaign recipients.` : "All previewed contacts are already selected.",
+        added > 0 ? "success" : ""
+      );
     });
 
     $("#btn-msg-send").addEventListener("click", async () => {
@@ -832,6 +992,7 @@
     await loadSettings();
     await loadStoredContacts();
     await loadCampaignHistory();
+    renderCampaignSelection();
     setMessageMode("manual");
   }
 

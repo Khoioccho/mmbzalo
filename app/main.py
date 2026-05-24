@@ -205,6 +205,8 @@ async def create_campaign(payload: CampaignDraftPayload):
         raise HTTPException(400, "Campaign name is required.")
     if not payload.message.strip():
         raise HTTPException(400, "Campaign message cannot be empty.")
+    if not payload.filters.selected_ids:
+        raise HTTPException(400, "Select at least one campaign recipient before saving.")
     try:
         campaign = contact_store.create_campaign(payload)
         return CampaignOperationResult(

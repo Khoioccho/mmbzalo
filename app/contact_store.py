@@ -16,6 +16,7 @@ from app.models import (
     ContactSyncDiagnostics,
     ContactSyncRunInfo,
 )
+from app.contact_name_utils import normalize_contact_name
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 CONTACTS_DB_PATH = os.path.join(BASE_DIR, "contacts.sqlite3")
@@ -199,9 +200,10 @@ class ContactStore:
 
     def create_campaign(self, payload: CampaignDraftPayload) -> CampaignInfo:
         filters = self._normalize_filters(payload.filters)
+        selected_ids = list(dict.fromkeys(filters.selected_ids))
         created_at = datetime.utcnow().isoformat()
         with self._lock, self._connect() as conn:
-            matched_contacts = self._fetch_campaign_matches(conn, filters)
+            matched_contacts = self._resolve_campaign_selected_contacts(conn, selected_ids, filters)
             cursor = conn.execute(
                 """
                 INSERT INTO campaigns (
@@ -213,7 +215,7 @@ class ContactStore:
                     payload.name.strip(),
                     payload.message,
                     json.dumps(filters.model_dump()),
-                    json.dumps(filters.selected_ids),
+                    json.dumps(selected_ids),
                     json.dumps([item.model_dump() for item in matched_contacts]),
                     len(matched_contacts),
                     created_at,
@@ -244,14 +246,15 @@ class ContactStore:
             campaign = self._fetch_campaign_by_id(conn, campaign_id)
             if not campaign:
                 raise ValueError("Campaign not found.")
-            matched_contacts = self._fetch_campaign_matches(conn, campaign.filters)
+            selected_contact_ids = campaign.selected_contact_ids or campaign.filters.selected_ids
+            matched_contacts = self._resolve_campaign_selected_contacts(conn, selected_contact_ids, campaign.filters)
             selected_targets = self._build_campaign_targets(matched_contacts)
             return {
                 "campaign": campaign.model_copy(
                     update={
                         "matched_contacts": matched_contacts,
                         "matched_count": len(matched_contacts),
-                        "selected_contact_ids": campaign.filters.selected_ids,
+                        "selected_contact_ids": selected_contact_ids,
                     }
                 ),
                 "targets": selected_targets,
@@ -325,9 +328,10 @@ class ContactStore:
             query.append("AND identity_source = ?")
             params.append(filters.identity_source)
         if filters.selected_ids:
-            placeholders = ",".join("?" for _ in filters.selected_ids)
+            selected_ids = self._expand_selected_identity_keys(filters.selected_ids)
+            placeholders = ",".join("?" for _ in selected_ids)
             query.append(f"AND identity_key IN ({placeholders})")
-            params.extend(filters.selected_ids)
+            params.extend(selected_ids)
 
         sort_column = "LOWER(name)"
         if filters.sort_by == "last_seen_at":
@@ -339,7 +343,7 @@ class ContactStore:
         return [
             ContactInfo(
                 zid=row["zid"],
-                name=row["name"],
+                name=normalize_contact_name(row["name"]) or row["name"],
                 phone=row["phone"],
                 avatar_url=row["avatar_url"],
                 last_message=row["last_message"],
@@ -403,10 +407,12 @@ class ContactStore:
     def _coerce_contact(self, contact: ContactInfo | dict, timestamp: str) -> ContactInfo:
         if not isinstance(contact, ContactInfo):
             contact = ContactInfo(**contact)
-        identity_key = contact.identity_key or self._identity_key(contact.zid, contact.name, contact.avatar_url)
+        normalized_name = normalize_contact_name(contact.name)
+        identity_key = contact.identity_key or self._identity_key(contact.zid, normalized_name or contact.name, contact.avatar_url)
         identity_source = contact.identity_source or ("zid" if contact.zid else "name_avatar")
         return contact.model_copy(
             update={
+                "name": normalized_name or contact.name,
                 "identity_key": identity_key,
                 "identity_source": identity_source,
                 "last_seen_at": timestamp,
@@ -425,7 +431,7 @@ class ContactStore:
     def _identity_key(self, zid: Optional[str], name: str, avatar_url: Optional[str]) -> str:
         if zid:
             return f"id:{zid}"
-        normalized_name = " ".join((name or "").strip().lower().split())
+        normalized_name = normalize_contact_name(name).lower()
         normalized_avatar = (avatar_url or "").strip().lower()
         return f"name_avatar:{normalized_name}|{normalized_avatar}"
 
@@ -457,6 +463,101 @@ class ContactStore:
             )
             for item in contacts
         ]
+
+    def _resolve_campaign_selected_contacts(
+        self,
+        conn: sqlite3.Connection,
+        selected_ids: list[str],
+        filters: Optional[ContactQueryParams] = None,
+    ) -> list[CampaignContactPreview]:
+        ordered_ids = [item for item in dict.fromkeys(selected_ids) if item]
+        if not ordered_ids:
+            return []
+
+        expanded_ids = self._expand_selected_identity_keys(ordered_ids)
+        contacts = self._fetch_active_contacts(
+            conn,
+            ContactQueryParams(
+                selected_ids=expanded_ids,
+                sort_by=(filters.sort_by if filters else "name"),
+                sort_order=(filters.sort_order if filters else "asc"),
+            ),
+        )
+        order_lookup: dict[str, int] = {}
+        for index, identity_key in enumerate(ordered_ids):
+            for alias in self._identity_key_aliases(identity_key):
+                order_lookup.setdefault(alias, index)
+        contacts.sort(key=lambda item: order_lookup.get(item.identity_key or "", len(order_lookup)))
+        return [
+            CampaignContactPreview(
+                identity_key=item.identity_key or "",
+                name=item.name,
+                avatar_url=item.avatar_url,
+                unread=item.unread,
+                identity_source=item.identity_source,
+                last_seen_at=item.last_seen_at,
+            )
+            for item in contacts
+        ]
+
+    def _expand_selected_identity_keys(self, selected_ids: list[str]) -> list[str]:
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for identity_key in selected_ids:
+            for alias in self._identity_key_aliases(identity_key):
+                if alias and alias not in seen:
+                    seen.add(alias)
+                    expanded.append(alias)
+        return expanded
+
+    def _identity_key_aliases(self, identity_key: str) -> list[str]:
+        key = (identity_key or "").strip()
+        if not key:
+            return []
+
+        aliases = [key]
+        normalized_key = self._normalize_identity_key(key)
+        if normalized_key != key:
+            aliases.append(normalized_key)
+        return aliases
+
+    def _normalize_identity_key(self, identity_key: str) -> str:
+        if not identity_key.startswith("name_avatar:"):
+            return identity_key
+
+        payload = identity_key[len("name_avatar:") :]
+        name_part, separator, avatar_part = payload.partition("|")
+        if not separator:
+            return identity_key
+
+        normalized_name = self._normalize_identity_name(name_part)
+        normalized_avatar = avatar_part.strip().lower()
+        return f"name_avatar:{normalized_name}|{normalized_avatar}"
+
+    def _normalize_identity_name(self, value: str) -> str:
+        normalized_value = " ".join((value or "").strip().lower().split())
+        max_prefix = min(4, len(normalized_value) - 1)
+        for prefix_len in range(max_prefix, 0, -1):
+            prefix = normalized_value[:prefix_len]
+            remainder = normalized_value[prefix_len:].lstrip()
+            if not prefix.isalpha() or not remainder[:2].isalpha():
+                continue
+            words = [word for word in remainder.split(" ") if word]
+            initials = [word[0] for word in words if word and word[0].isalpha()]
+            if not initials:
+                continue
+
+            comparisons = {initials[0]}
+            if len(initials) >= 2:
+                comparisons.add(initials[0] + initials[1])
+                comparisons.add(initials[0] + initials[-1])
+            if len(initials) >= len(prefix):
+                comparisons.add("".join(initials[: len(prefix)]))
+
+            if prefix in comparisons:
+                return remainder
+
+        return normalized_value
 
     def _build_campaign_targets(self, matched_contacts: list[CampaignContactPreview]) -> list[str]:
         return [contact.name for contact in matched_contacts]
