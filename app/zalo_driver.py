@@ -28,6 +28,7 @@ from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserCon
 
 from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
 from app.models import (
+    CampaignContactPreview,
     LoginState,
     ContactInfo,
     ContactSyncDiagnostics,
@@ -964,6 +965,410 @@ class ZaloDriver:
     #  MESSAGING
     # ═══════════════════════════════════════════════════════════
 
+    def _open_target_via_search(self, page: Page, target: str) -> tuple[bool, Optional[str], Optional[str]]:
+        search_target = normalize_contact_name(target) or target
+        if not self._open_search(page):
+            return False, "search_open_failed: Could not open search bar.", None
+
+        page.keyboard.type(search_target, delay=50)
+        time.sleep(2)
+        selected = self._select_search_result(page, expected_text=search_target)
+        if not selected.get("clicked"):
+            artifacts = self._capture_send_debug(page, f"send-search-result-not-found-{target}")
+            suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
+            return False, f"search_result_not_found: No visible result for '{target}'.{suffix}", None
+
+        time.sleep(1.5)
+        active_thread_target = selected.get("text") or search_target
+        if not self._confirm_active_thread(page, search_target, target, active_thread_target):
+            artifacts = self._capture_send_debug(page, f"send-thread-not-opened-{target}")
+            suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
+            return False, f"target_thread_not_opened: Selected '{target}' but the chat thread did not open.{suffix}", None
+
+        return True, None, search_target
+
+    def _open_conversation_view(self, page: Page) -> bool:
+        self._clear_search_input(page)
+        if self._looks_like_conversation_view(page):
+            return True
+
+        selectors = [
+            '#main-tab .leftbar-tab.selected[title*="Tin nh"]',
+            '#main-tab .leftbar-tab[title*="Tin nh"]',
+            '#main-tab .leftbar-tab[title*="Message"]',
+            '[data-tab="messages"]',
+            '[aria-label*="Tin nh"]',
+            '[aria-label*="Message"]',
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if locator.count() == 0 or not locator.is_visible():
+                    continue
+                locator.click(timeout=3_000)
+                time.sleep(1.5)
+                self._clear_search_input(page)
+                if self._looks_like_conversation_view(page):
+                    return True
+            except Exception:
+                continue
+
+        return self._looks_like_conversation_view(page)
+
+    def _find_conversation_list_context(self, page: Page) -> Optional[dict]:
+        return page.evaluate(
+            """
+            () => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const rowSelectors = [
+                    '[data-id]',
+                    '.conv-item',
+                    '[class*="conv-item"]',
+                    '[class*="conversation-item"]',
+                    '[class*="ConversationItem"]',
+                    '[class*="chat-item"]',
+                    '[class*="ChatItem"]',
+                    '[role="listitem"]',
+                    '[role="option"]',
+                    'div[tabindex="0"]',
+                ];
+                const containerSelectors = [
+                    '#lst-conversation',
+                    '#container [class*="conversation-list"]',
+                    '#container [class*="ConversationList"]',
+                    '#container [class*="chat-list"]',
+                    '#container [class*="ChatList"]',
+                    '#container aside',
+                    '[class*="conversation-list"]',
+                    '[class*="ConversationList"]',
+                    '[class*="chat-list"]',
+                    '[class*="ChatList"]',
+                    '[role="list"]',
+                    '[role="listbox"]',
+                ];
+
+                document.querySelectorAll('[data-mmbzalo-thread-container]').forEach((el) => {
+                    el.removeAttribute('data-mmbzalo-thread-container');
+                });
+
+                const scoreContainer = (container) => {
+                    const rect = container.getBoundingClientRect();
+                    if (!isVisible(container) || rect.height < 180 || rect.width < 160) {
+                        return null;
+                    }
+                    if (rect.left > window.innerWidth * 0.55) {
+                        return null;
+                    }
+
+                    const rows = [];
+                    const seen = new Set();
+                    for (const selector of rowSelectors) {
+                        for (const el of container.querySelectorAll(selector)) {
+                            if (seen.has(el) || !isVisible(el)) continue;
+                            const rowRect = el.getBoundingClientRect();
+                            if (rowRect.width < 120 || rowRect.height < 28) continue;
+                            if (!container.contains(el) || el === container) continue;
+                            seen.add(el);
+                            rows.push(el);
+                        }
+                    }
+
+                    let score = rows.length * 100;
+                    if (container.scrollHeight > container.clientHeight + 60) score += 25;
+                    if (rect.left < window.innerWidth * 0.4) score += 10;
+                    return {
+                        container,
+                        rowCount: rows.length,
+                        score,
+                    };
+                };
+
+                const candidates = [];
+                const seenContainers = new Set();
+                for (const selector of containerSelectors) {
+                    for (const container of document.querySelectorAll(selector)) {
+                        if (seenContainers.has(container)) continue;
+                        seenContainers.add(container);
+                        const scored = scoreContainer(container);
+                        if (scored) candidates.push(scored);
+                    }
+                }
+
+                if (!candidates.length) {
+                    const heuristic = Array.from(document.querySelectorAll('div, aside, section'))
+                        .filter((el) => !seenContainers.has(el))
+                        .map((el) => scoreContainer(el))
+                        .filter(Boolean);
+                    candidates.push(...heuristic);
+                }
+
+                candidates.sort((a, b) => b.score - a.score);
+                const best = candidates[0];
+                if (!best || best.rowCount === 0) {
+                    return null;
+                }
+
+                best.container.setAttribute('data-mmbzalo-thread-container', '1');
+                return {
+                    container_selector: '[data-mmbzalo-thread-container="1"]',
+                    row_count: best.rowCount,
+                    scroll_height: best.container.scrollHeight || 0,
+                    client_height: best.container.clientHeight || 0,
+                };
+            }
+            """
+        )
+
+    def _collect_visible_conversation_threads(self, page: Page, list_context: dict) -> dict:
+        return page.evaluate(
+            """
+            ({ containerSelector }) => {
+                const container = document.querySelector(containerSelector);
+                if (!container) {
+                    return { threads: [], scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
+                }
+
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const collectTexts = (node, selector) => Array.from(node.querySelectorAll(selector))
+                    .map((el) => (el.textContent || '').trim())
+                    .filter(Boolean)
+                    .filter((value) => value.length < 140);
+                const initialsOnly = (value) => {
+                    const compact = (value || '').replace(/\\s+/g, '');
+                    return compact.length > 0 && compact.length <= 4 && /^[A-Z]+$/.test(compact);
+                };
+                const extractName = (node) => {
+                    const textCandidates = collectTexts(node, 'span, p, strong, h1, h2, h3, h4, h5, h6');
+                    if (!textCandidates.length) {
+                        textCandidates.push(...collectTexts(node, 'div'));
+                    }
+                    const nameIndex = textCandidates.findIndex((value) => !initialsOnly(value));
+                    return (nameIndex >= 0 ? textCandidates[nameIndex] : null)
+                        || (node.textContent || '').trim().split('\\n')[0]
+                        || '';
+                };
+                const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase();
+                const rowSelectors = [
+                    '[data-id]',
+                    '.conv-item',
+                    '[class*="conv-item"]',
+                    '[class*="conversation-item"]',
+                    '[class*="ConversationItem"]',
+                    '[class*="chat-item"]',
+                    '[class*="ChatItem"]',
+                    '[role="listitem"]',
+                    '[role="option"]',
+                    'div[tabindex="0"]',
+                ];
+
+                container.querySelectorAll('[data-mmbzalo-thread-key]').forEach((el) => {
+                    el.removeAttribute('data-mmbzalo-thread-key');
+                });
+
+                const rows = [];
+                const seen = new Set();
+                for (const selector of rowSelectors) {
+                    for (const el of container.querySelectorAll(selector)) {
+                        if (seen.has(el) || !isVisible(el) || el.closest('#searchResultList, #FIND_FRIEND, [role="dialog"], [class*="modal"]')) {
+                            continue;
+                        }
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 120 || rect.height < 28) continue;
+                        seen.add(el);
+                        rows.push(el);
+                    }
+                }
+
+                if (!rows.length) {
+                    for (const el of Array.from(container.children)) {
+                        if (!isVisible(el)) continue;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 120 || rect.height < 28) continue;
+                        if (!(el.textContent || '').trim()) continue;
+                        rows.push(el);
+                    }
+                }
+
+                const threads = [];
+                let index = 0;
+                for (const row of rows) {
+                    const name = extractName(row);
+                    const normalized = normalize(name);
+                    if (!normalized || normalized.length >= 140) continue;
+                    const key = `thread-${index++}`;
+                    row.setAttribute('data-mmbzalo-thread-key', key);
+                    threads.push({
+                        selector: `[data-mmbzalo-thread-key="${key}"]`,
+                        data_id: row.getAttribute('data-id') || row.dataset?.id || null,
+                        name,
+                        normalized,
+                        row_text: normalize((row.textContent || '').trim()),
+                    });
+                }
+
+                return {
+                    threads,
+                    scrollTop: container.scrollTop || 0,
+                    scrollHeight: container.scrollHeight || 0,
+                    clientHeight: container.clientHeight || 0,
+                };
+            }
+            """,
+            {"containerSelector": list_context["container_selector"]},
+        )
+
+    def _set_conversation_list_scroll(self, page: Page, list_context: dict, value: int) -> int:
+        return page.evaluate(
+            """
+            ({ containerSelector, value }) => {
+                const container = document.querySelector(containerSelector);
+                if (!container) return -1;
+                container.scrollTop = Math.max(0, value);
+                return container.scrollTop || 0;
+            }
+            """,
+            {"containerSelector": list_context["container_selector"], "value": value},
+        )
+
+    def _scroll_conversation_list(self, page: Page, list_context: dict, delta: int) -> int:
+        return page.evaluate(
+            """
+            ({ containerSelector, delta }) => {
+                const container = document.querySelector(containerSelector);
+                if (!container) return -1;
+                const before = container.scrollTop || 0;
+                container.scrollTop = Math.max(0, before + delta);
+                return container.scrollTop || 0;
+            }
+            """,
+            {"containerSelector": list_context["container_selector"], "delta": delta},
+        )
+
+    def _build_conversation_thread_index(self, page: Page, list_context: dict, max_passes: int = 10) -> dict[str, list[dict]]:
+        self._set_conversation_list_scroll(page, list_context, 0)
+        time.sleep(0.3)
+
+        index: dict[str, list[dict]] = {}
+        bottom_stable_passes = 0
+        for pass_index in range(max_passes):
+            snapshot = self._collect_visible_conversation_threads(page, list_context)
+            current_scroll_top = snapshot.get("scrollTop", 0)
+            scroll_height = snapshot.get("scrollHeight", 0)
+            client_height = snapshot.get("clientHeight", 0)
+            for item in snapshot.get("threads", []):
+                normalized = item.get("normalized")
+                if not normalized:
+                    continue
+                item["scroll_top"] = current_scroll_top
+                bucket = index.setdefault(normalized, [])
+                item_id = item.get("data_id")
+                item_signature = item.get("row_text") or item.get("name")
+                if not any(
+                    (item_id and existing.get("data_id") == item_id)
+                    or (
+                        not item_id
+                        and existing.get("normalized") == item.get("normalized")
+                        and (existing.get("row_text") or existing.get("name")) == item_signature
+                    )
+                    for existing in bucket
+                ):
+                    bucket.append(item)
+
+            logger.info(
+                "Campaign thread index crawl pass %s/%s: visible=%s indexed_names=%s scroll_top=%s scroll_height=%s",
+                pass_index + 1,
+                max_passes,
+                len(snapshot.get("threads", [])),
+                len(index),
+                current_scroll_top,
+                scroll_height,
+            )
+
+            at_bottom = scroll_height > 0 and (current_scroll_top + client_height >= scroll_height - 12)
+            if at_bottom:
+                bottom_stable_passes += 1
+                if bottom_stable_passes >= 2:
+                    break
+            else:
+                bottom_stable_passes = 0
+
+            delta = max(240, min(int((client_height or 360) * 0.85), 960))
+            next_scroll_top = self._scroll_conversation_list(page, list_context, delta)
+            if next_scroll_top == current_scroll_top:
+                bottom_stable_passes += 1
+                if bottom_stable_passes >= 2:
+                    break
+            time.sleep(0.35)
+
+        self._set_conversation_list_scroll(page, list_context, 0)
+        time.sleep(0.2)
+        return index
+
+    def _open_indexed_conversation_thread(
+        self,
+        page: Page,
+        list_context: dict,
+        entry: dict,
+        target: str,
+        max_passes: int = 8,
+    ) -> tuple[bool, Optional[str]]:
+        target_scroll = int(entry.get("scroll_top", 0) or 0)
+        self._set_conversation_list_scroll(page, list_context, max(target_scroll - 80, 0))
+        time.sleep(0.25)
+
+        expected_id = entry.get("data_id")
+        expected_name = entry.get("normalized")
+        client_height = 0
+
+        for pass_index in range(max_passes):
+            snapshot = self._collect_visible_conversation_threads(page, list_context)
+            client_height = snapshot.get("clientHeight", 0) or client_height
+            candidates = []
+            if expected_id:
+                candidates = [item for item in snapshot.get("threads", []) if item.get("data_id") == expected_id]
+            if not candidates and expected_name:
+                candidates = [item for item in snapshot.get("threads", []) if item.get("normalized") == expected_name]
+
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                try:
+                    locator = page.locator(candidate["selector"]).first
+                    if locator.count() == 0 or not locator.is_visible():
+                        return False, "direct_thread_not_visible"
+                    locator.click(timeout=3_000)
+                    time.sleep(1.0)
+                except Exception as exc:
+                    logger.info(f"Campaign direct thread click failed for {target}: {exc}")
+                    return False, "direct_thread_click_failed"
+
+                active_thread_target = candidate.get("name") or target
+                if not self._confirm_active_thread(page, target, active_thread_target):
+                    return False, "direct_thread_not_opened"
+                return True, None
+
+            current_scroll_top = snapshot.get("scrollTop", 0)
+            scroll_height = snapshot.get("scrollHeight", 0)
+            if scroll_height > 0 and current_scroll_top + (client_height or 0) >= scroll_height - 12:
+                break
+
+            delta = max(240, min(int((client_height or 360) * 0.85), 960))
+            next_scroll_top = self._scroll_conversation_list(page, list_context, delta)
+            if next_scroll_top == current_scroll_top:
+                break
+            time.sleep(0.3)
+
+        return False, "direct_thread_unavailable"
+
     def _send_messages_sync(self, targets, message, delay_min, delay_max) -> dict:
         context, page = self._worker_page()
         results = []
@@ -972,23 +1377,10 @@ class ZaloDriver:
                 logger.info(f"Messaging {i+1}/{len(targets)}: {target}")
                 success, error = False, None
                 try:
-                    search_target = normalize_contact_name(target) or target
-                    if not self._open_search(page):
-                        raise RuntimeError("search_open_failed: Could not open search bar.")
-                    page.keyboard.type(search_target, delay=50)
-                    time.sleep(2)
-                    selected = self._select_search_result(page, expected_text=search_target)
-                    if not selected.get("clicked"):
-                        artifacts = self._capture_send_debug(page, f"send-search-result-not-found-{target}")
-                        suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
-                        raise RuntimeError(f"search_result_not_found: No visible result for '{target}'.{suffix}")
-                    time.sleep(1.5)
-                    active_thread_target = selected.get("text") or search_target
-                    if not self._confirm_active_thread(page, search_target, target, active_thread_target):
-                        artifacts = self._capture_send_debug(page, f"send-thread-not-opened-{target}")
-                        suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
-                        raise RuntimeError(f"target_thread_not_opened: Selected '{target}' but the chat thread did not open.{suffix}")
-                    sent, send_error = self._type_and_send_detailed(page, message, target=search_target)
+                    opened, open_error, send_target = self._open_target_via_search(page, target)
+                    if not opened:
+                        raise RuntimeError(open_error or f"search_result_not_found: No visible result for '{target}'.")
+                    sent, send_error = self._type_and_send_detailed(page, message, target=send_target)
                     if not sent:
                         artifacts = self._capture_send_debug(page, f"send-composer-not-found-{target}")
                         suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
@@ -1012,6 +1404,133 @@ class ZaloDriver:
 
     async def send_messages(self, targets, message, delay_min=15.0, delay_max=30.0) -> dict:
         return await _run_in_thread(self._send_messages_sync, targets, message, delay_min, delay_max)
+
+    def _send_campaign_messages_sync(self, contacts, message, delay_min, delay_max) -> dict:
+        context, page = self._worker_page()
+        results = []
+        route_stats = {"direct_thread": 0, "search_fallback": 0, "not_found": 0}
+        started_at = time.monotonic()
+        open_timings_ms: list[int] = []
+        try:
+            campaign_contacts = []
+            for item in contacts:
+                if isinstance(item, CampaignContactPreview):
+                    campaign_contacts.append(item)
+                else:
+                    campaign_contacts.append(CampaignContactPreview(**item))
+
+            list_context = None
+            thread_index: dict[str, list[dict]] = {}
+            if self._open_conversation_view(page):
+                list_context = self._find_conversation_list_context(page)
+                if list_context:
+                    crawl_started_at = time.monotonic()
+                    thread_index = self._build_conversation_thread_index(page, list_context)
+                    crawl_elapsed = round((time.monotonic() - crawl_started_at) * 1000)
+                    logger.info(
+                        "Campaign thread index ready: %s visible names, %s unique, %s ambiguous, crawl_ms=%s.",
+                        len(thread_index),
+                        sum(1 for entries in thread_index.values() if len(entries) == 1),
+                        sum(1 for entries in thread_index.values() if len(entries) > 1),
+                        crawl_elapsed,
+                    )
+                else:
+                    logger.info("Campaign conversation list context not found; falling back to search-only mode.")
+            else:
+                logger.info("Campaign conversation view unavailable; falling back to search-only mode.")
+
+            for i, contact in enumerate(campaign_contacts):
+                target = normalize_contact_name(contact.name) or contact.name
+                logger.info(f"Campaign messaging {i+1}/{len(campaign_contacts)}: {target}")
+                success, error = False, None
+                route = "not_found"
+                open_started_at = time.monotonic()
+                try:
+                    if thread_index and list_context:
+                        self._open_conversation_view(page)
+                    direct_entries = thread_index.get(self._normalize_visible_text(target), [])
+                    used_direct_thread = False
+                    if len(direct_entries) == 1:
+                        opened, direct_error = self._open_indexed_conversation_thread(page, list_context, direct_entries[0], target)
+                        if opened:
+                            used_direct_thread = True
+                            route = "direct_thread"
+                            route_open_ms = round((time.monotonic() - open_started_at) * 1000)
+                            open_timings_ms.append(route_open_ms)
+                            logger.info(
+                                "Campaign route direct_thread: %s open_ms=%s",
+                                target,
+                                route_open_ms,
+                            )
+                        else:
+                            logger.info(f"Campaign direct thread unavailable for {target}: {direct_error}")
+                    elif len(direct_entries) > 1:
+                        logger.info(f"Campaign direct thread ambiguous for {target}; using search fallback.")
+
+                    if not used_direct_thread:
+                        opened, open_error, send_target = self._open_target_via_search(page, target)
+                        if not opened:
+                            raise RuntimeError(open_error or f"search_result_not_found: No visible result for '{target}'.")
+                        route = "search_fallback"
+                        route_open_ms = round((time.monotonic() - open_started_at) * 1000)
+                        open_timings_ms.append(route_open_ms)
+                        logger.info(
+                            "Campaign route search_fallback: %s open_ms=%s",
+                            target,
+                            route_open_ms,
+                        )
+                    else:
+                        send_target = target
+
+                    sent, send_error = self._type_and_send_detailed(page, message, target=send_target)
+                    if not sent:
+                        artifacts = self._capture_send_debug(page, f"campaign-send-composer-not-found-{target}")
+                        suffix = f" debug={', '.join(artifacts)}" if artifacts else ""
+                        raise RuntimeError(f"{send_error}{suffix}")
+                    success = True
+                    logger.info(f"Campaign message sent to {target}")
+                except Exception as exc:
+                    error = str(exc)
+                    if "search_result_not_found" in error:
+                        route = "not_found"
+                        logger.info(f"Campaign route not_found: {target}")
+                    logger.warning(f"Campaign failed: {target}: {exc}")
+
+                route_stats[route] = route_stats.get(route, 0) + 1
+                results.append(
+                    {
+                        "identity_key": contact.identity_key,
+                        "target": contact.name,
+                        "success": success,
+                        "error": error,
+                        "route": route,
+                    }
+                )
+                if i < len(campaign_contacts) - 1:
+                    time.sleep(random.uniform(delay_min, delay_max))
+
+            sent = sum(1 for item in results if item["success"])
+            failed = len(results) - sent
+            total_elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            average_open_ms = round(sum(open_timings_ms) / max(len(open_timings_ms), 1)) if open_timings_ms else 0
+            message_summary = (
+                f"Sent {sent}/{len(campaign_contacts)} ({failed} failed). "
+                f"routes={route_stats} total_ms={total_elapsed_ms} avg_open_ms={average_open_ms}"
+            )
+            return {
+                "total": len(campaign_contacts),
+                "sent": sent,
+                "failed": failed,
+                "results": results,
+                "route_stats": route_stats,
+                "timing_ms": {"total": total_elapsed_ms, "avg_open": average_open_ms},
+                "message": message_summary,
+            }
+        finally:
+            context.close()
+
+    async def send_campaign_messages(self, contacts, message, delay_min=15.0, delay_max=30.0) -> dict:
+        return await _run_in_thread(self._send_campaign_messages_sync, contacts, message, delay_min, delay_max)
 
     # ═══════════════════════════════════════════════════════════
     #  FRIEND REQUESTS
@@ -1180,6 +1699,28 @@ class ZaloDriver:
         except Exception:
             pass
         return False
+
+    def _clear_search_input(self, page: Page) -> bool:
+        cleared = False
+        for sel in ['input[placeholder*="T\\u00ECm ki\\u1EBFm"]', 'input[placeholder*="Search"]',
+                    'input[type="search"]', '[class*="search"] input', '[class*="Search"] input',
+                    '#contact-search-input']:
+            try:
+                el = page.locator(sel).first
+                if el.count() == 0 or not el.is_visible():
+                    continue
+                el.click()
+                el.fill("")
+                cleared = True
+                time.sleep(0.2)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                break
+            except Exception:
+                continue
+        return cleared
 
     def _normalize_visible_text(self, value: Optional[str]) -> str:
         return re.sub(r"\s+", " ", (value or "").strip()).casefold()

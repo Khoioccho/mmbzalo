@@ -248,7 +248,6 @@ class ContactStore:
                 raise ValueError("Campaign not found.")
             selected_contact_ids = campaign.selected_contact_ids or campaign.filters.selected_ids
             matched_contacts = self._resolve_campaign_selected_contacts(conn, selected_contact_ids, campaign.filters)
-            selected_targets = self._build_campaign_targets(matched_contacts)
             return {
                 "campaign": campaign.model_copy(
                     update={
@@ -257,21 +256,26 @@ class ContactStore:
                         "selected_contact_ids": selected_contact_ids,
                     }
                 ),
-                "targets": selected_targets,
+                "matched_contacts": matched_contacts,
+                "targets": self._build_campaign_targets(matched_contacts),
             }
 
     def finalize_campaign_execution(self, campaign_id: int, matched_contacts: list[CampaignContactPreview], send_result: dict) -> CampaignInfo:
         executed_at = datetime.utcnow().isoformat()
         results = []
         result_lookup = {}
+        identity_lookup = {}
         for row in send_result.get("results", []):
             if hasattr(row, "model_dump"):
                 row = row.model_dump()
             result_lookup[row["target"]] = row
+            identity_key = row.get("identity_key")
+            if identity_key:
+                identity_lookup[identity_key] = row
 
         targets = self._build_campaign_targets(matched_contacts)
         for contact, target in zip(matched_contacts, targets):
-            outcome = result_lookup.get(target, {})
+            outcome = identity_lookup.get(contact.identity_key) or result_lookup.get(target, {})
             results.append(
                 CampaignResultItem(
                     identity_key=contact.identity_key,

@@ -241,11 +241,11 @@ async def execute_campaign(campaign_id: int, payload: CampaignExecutePayload):
     try:
         prepared = contact_store.prepare_campaign_execution(campaign_id)
         campaign = prepared["campaign"]
-        targets = prepared["targets"]
-        if not targets:
+        matched_contacts = prepared["matched_contacts"]
+        if not matched_contacts:
             raise HTTPException(400, "Campaign has no matched contacts to execute.")
-        send_result = await driver.send_messages(
-            targets=targets,
+        send_result = await driver.send_campaign_messages(
+            contacts=matched_contacts,
             message=campaign.message,
             delay_min=payload.delay_min,
             delay_max=payload.delay_max,

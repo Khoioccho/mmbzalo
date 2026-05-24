@@ -504,13 +504,16 @@
 
   async function executeCampaignDraft() {
     const campaignResult = await createCampaignDraft();
-    const delayMin = parseFloat($("#msg-delay-min").value) || 15;
-    const delayMax = parseFloat($("#msg-delay-max").value) || 30;
+    const delayMin = parseFloat($("#campaign-delay-min").value);
+    const delayMax = parseFloat($("#campaign-delay-max").value);
     const campaignId = campaignResult.campaign.campaign_id;
     const res = await fetch(`/api/campaigns/${campaignId}/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ delay_min: delayMin, delay_max: delayMax }),
+      body: JSON.stringify({
+        delay_min: Number.isFinite(delayMin) ? delayMin : 1,
+        delay_max: Number.isFinite(delayMax) ? delayMax : 3,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed");

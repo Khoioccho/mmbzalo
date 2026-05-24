@@ -135,8 +135,8 @@ class CampaignDraftPayload(BaseModel):
 
 
 class CampaignExecutePayload(BaseModel):
-    delay_min: float = Field(15.0, description="Min delay between sends (seconds).")
-    delay_max: float = Field(30.0, description="Max delay between sends (seconds).")
+    delay_min: float = Field(1.0, description="Min delay between campaign sends (seconds).")
+    delay_max: float = Field(3.0, description="Max delay between campaign sends (seconds).")
 
 
 class CampaignResultItem(BaseModel):
