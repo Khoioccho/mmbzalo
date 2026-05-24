@@ -175,6 +175,27 @@ class CampaignOperationResult(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
+class CampaignProgressEvent(BaseModel):
+    sequence: int
+    message: str
+    level: str = "info"
+    target: Optional[str] = None
+    route: Optional[str] = None
+    success: Optional[bool] = None
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class CampaignProgressResult(BaseModel):
+    campaign_id: int
+    status: str = "idle"
+    total: int = 0
+    sent: int = 0
+    failed: int = 0
+    current: Optional[str] = None
+    events: list[CampaignProgressEvent] = Field(default_factory=list)
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
 class MessagePayload(BaseModel):
     """Send a message to one or more targets."""
 

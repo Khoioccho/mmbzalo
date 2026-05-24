@@ -22,7 +22,7 @@ import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
@@ -1405,12 +1405,20 @@ class ZaloDriver:
     async def send_messages(self, targets, message, delay_min=15.0, delay_max=30.0) -> dict:
         return await _run_in_thread(self._send_messages_sync, targets, message, delay_min, delay_max)
 
-    def _send_campaign_messages_sync(self, contacts, message, delay_min, delay_max) -> dict:
+    def _send_campaign_messages_sync(self, contacts, message, delay_min, delay_max, progress_callback: Optional[Callable[[dict], None]] = None) -> dict:
         context, page = self._worker_page()
         results = []
         route_stats = {"direct_thread": 0, "search_fallback": 0, "not_found": 0}
         started_at = time.monotonic()
         open_timings_ms: list[int] = []
+        def emit_progress(event: dict) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(event)
+            except Exception as exc:
+                logger.info(f"Campaign progress callback failed: {exc}")
+
         try:
             campaign_contacts = []
             for item in contacts:
@@ -1418,6 +1426,12 @@ class ZaloDriver:
                     campaign_contacts.append(item)
                 else:
                     campaign_contacts.append(CampaignContactPreview(**item))
+            emit_progress(
+                {
+                    "event": "started",
+                    "message": f"Campaign execution started for {len(campaign_contacts)} recipient(s).",
+                }
+            )
 
             list_context = None
             thread_index: dict[str, list[dict]] = {}
@@ -1434,10 +1448,33 @@ class ZaloDriver:
                         sum(1 for entries in thread_index.values() if len(entries) > 1),
                         crawl_elapsed,
                     )
+                    emit_progress(
+                        {
+                            "event": "thread_index",
+                            "message": (
+                                f"Indexed {len(thread_index)} conversation name(s), "
+                                f"{sum(1 for entries in thread_index.values() if len(entries) == 1)} unique."
+                            ),
+                        }
+                    )
                 else:
                     logger.info("Campaign conversation list context not found; falling back to search-only mode.")
+                    emit_progress(
+                        {
+                            "event": "thread_index",
+                            "level": "error",
+                            "message": "Conversation list was not detected; using search fallback.",
+                        }
+                    )
             else:
                 logger.info("Campaign conversation view unavailable; falling back to search-only mode.")
+                emit_progress(
+                    {
+                        "event": "thread_index",
+                        "level": "error",
+                        "message": "Conversation view was not available; using search fallback.",
+                    }
+                )
 
             for i, contact in enumerate(campaign_contacts):
                 target = normalize_contact_name(contact.name) or contact.name
@@ -1445,6 +1482,13 @@ class ZaloDriver:
                 success, error = False, None
                 route = "not_found"
                 open_started_at = time.monotonic()
+                emit_progress(
+                    {
+                        "event": "target_start",
+                        "target": target,
+                        "message": f"Sending {i + 1}/{len(campaign_contacts)}: {target}",
+                    }
+                )
                 try:
                     if thread_index and list_context:
                         self._open_conversation_view(page)
@@ -1461,6 +1505,14 @@ class ZaloDriver:
                                 "Campaign route direct_thread: %s open_ms=%s",
                                 target,
                                 route_open_ms,
+                            )
+                            emit_progress(
+                                {
+                                    "event": "route",
+                                    "target": target,
+                                    "route": route,
+                                    "message": f"Opened existing chat for {target}.",
+                                }
                             )
                         else:
                             logger.info(f"Campaign direct thread unavailable for {target}: {direct_error}")
@@ -1479,6 +1531,14 @@ class ZaloDriver:
                             target,
                             route_open_ms,
                         )
+                        emit_progress(
+                            {
+                                "event": "route",
+                                "target": target,
+                                "route": route,
+                                "message": f"Opened {target} through search fallback.",
+                            }
+                        )
                     else:
                         send_target = target
 
@@ -1489,12 +1549,31 @@ class ZaloDriver:
                         raise RuntimeError(f"{send_error}{suffix}")
                     success = True
                     logger.info(f"Campaign message sent to {target}")
+                    emit_progress(
+                        {
+                            "event": "target_done",
+                            "target": target,
+                            "route": route,
+                            "success": True,
+                            "message": f"Sent to {target}.",
+                        }
+                    )
                 except Exception as exc:
                     error = str(exc)
                     if "search_result_not_found" in error:
                         route = "not_found"
                         logger.info(f"Campaign route not_found: {target}")
                     logger.warning(f"Campaign failed: {target}: {exc}")
+                    emit_progress(
+                        {
+                            "event": "target_done",
+                            "level": "error",
+                            "target": target,
+                            "route": route,
+                            "success": False,
+                            "message": f"Failed {target}: {error}",
+                        }
+                    )
 
                 route_stats[route] = route_stats.get(route, 0) + 1
                 results.append(
@@ -1517,6 +1596,12 @@ class ZaloDriver:
                 f"Sent {sent}/{len(campaign_contacts)} ({failed} failed). "
                 f"routes={route_stats} total_ms={total_elapsed_ms} avg_open_ms={average_open_ms}"
             )
+            emit_progress(
+                {
+                    "event": "complete",
+                    "message": f"Campaign completed: {sent}/{len(campaign_contacts)} sent, {failed} failed.",
+                }
+            )
             return {
                 "total": len(campaign_contacts),
                 "sent": sent,
@@ -1529,8 +1614,8 @@ class ZaloDriver:
         finally:
             context.close()
 
-    async def send_campaign_messages(self, contacts, message, delay_min=15.0, delay_max=30.0) -> dict:
-        return await _run_in_thread(self._send_campaign_messages_sync, contacts, message, delay_min, delay_max)
+    async def send_campaign_messages(self, contacts, message, delay_min=15.0, delay_max=30.0, progress_callback: Optional[Callable[[dict], None]] = None) -> dict:
+        return await _run_in_thread(self._send_campaign_messages_sync, contacts, message, delay_min, delay_max, progress_callback)
 
     # ═══════════════════════════════════════════════════════════
     #  FRIEND REQUESTS

@@ -9,6 +9,8 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
   let loginPollInterval = null;
+  let campaignProgressPollInterval = null;
+  let campaignProgressSeen = new Set();
   let lastCampaignPreview = null;
   let campaignHistoryCache = [];
   const manualPickerState = {
@@ -46,6 +48,60 @@
     entry.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${type ? "log-msg--" + type : ""}">${esc(msg)}</span>`;
     logEl.prepend(entry);
     while (logEl.children.length > 50) logEl.lastChild.remove();
+  }
+
+  function resetCampaignProgressUI(total = 0) {
+    campaignProgressSeen = new Set();
+    $("#campaign-progress").style.display = "block";
+    $("#campaign-progress-count").textContent = total ? `0/${total} sent` : "Starting";
+    $("#campaign-progress-list").innerHTML = '<div class="campaign-progress__item">Preparing campaign...</div>';
+  }
+
+  function appendCampaignProgressEvent(event) {
+    if (!event || campaignProgressSeen.has(event.sequence)) return;
+    campaignProgressSeen.add(event.sequence);
+    const list = $("#campaign-progress-list");
+    const preparing = list.querySelector(".campaign-progress__item");
+    if (preparing && preparing.textContent === "Preparing campaign...") preparing.remove();
+    const item = document.createElement("div");
+    item.className = `campaign-progress__item ${event.success === true ? "campaign-progress__item--success" : ""} ${event.success === false ? "campaign-progress__item--error" : ""}`;
+    const route = event.route ? `<span class="campaign-progress__route">${esc(event.route.replace("_", " "))}</span>` : "";
+    item.innerHTML = `<span>${esc(event.message || "")}</span>${route}`;
+    list.prepend(item);
+    while (list.children.length > 30) list.lastChild.remove();
+    if (event.message) log(event.message, event.level === "error" || event.success === false ? "error" : event.success === true ? "success" : "");
+  }
+
+  async function pollCampaignProgress(campaignId) {
+    const res = await fetch(`/api/campaigns/${campaignId}/progress`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed to load campaign progress.");
+    $("#campaign-progress").style.display = "block";
+    $("#campaign-progress-count").textContent = data.total ? `${data.sent}/${data.total} sent` : data.status;
+    (data.events || []).forEach(appendCampaignProgressEvent);
+    if (data.status === "completed" || data.status === "failed") {
+      stopCampaignProgressPolling();
+    }
+    return data;
+  }
+
+  function startCampaignProgressPolling(campaignId, total = 0) {
+    stopCampaignProgressPolling();
+    resetCampaignProgressUI(total);
+    pollCampaignProgress(campaignId).catch(() => {});
+    campaignProgressPollInterval = setInterval(() => {
+      pollCampaignProgress(campaignId).catch((err) => {
+        log(`Campaign progress error: ${err.message}`, "error");
+        stopCampaignProgressPolling();
+      });
+    }, 1000);
+  }
+
+  function stopCampaignProgressPolling() {
+    if (campaignProgressPollInterval) {
+      clearInterval(campaignProgressPollInterval);
+      campaignProgressPollInterval = null;
+    }
   }
 
   function setContactsStatus(state, message) {
@@ -442,7 +498,8 @@
         list.innerHTML = '<p class="field-hint">No campaigns yet.</p>';
         return;
       }
-      list.innerHTML = campaignHistoryCache.map((campaign) => `
+      const visibleCampaigns = campaignHistoryCache.slice(0, 4);
+      list.innerHTML = visibleCampaigns.map((campaign) => `
         <div class="campaign-history__item">
           <div class="campaign-history__row">
             <div class="campaign-history__meta">
@@ -456,6 +513,9 @@
           </div>
         </div>
       `).join("");
+      if (campaignHistoryCache.length > visibleCampaigns.length) {
+        list.insertAdjacentHTML("beforeend", `<p class="field-hint">Showing latest ${visibleCampaigns.length} of ${campaignHistoryCache.length} campaigns.</p>`);
+      }
     } catch (err) {
       log(`Campaign history load error: ${err.message}`, "error");
     }
@@ -507,6 +567,7 @@
     const delayMin = parseFloat($("#campaign-delay-min").value);
     const delayMax = parseFloat($("#campaign-delay-max").value);
     const campaignId = campaignResult.campaign.campaign_id;
+    startCampaignProgressPolling(campaignId, campaignResult.campaign.matched_count || 0);
     const res = await fetch(`/api/campaigns/${campaignId}/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -517,6 +578,8 @@
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed");
+    await pollCampaignProgress(campaignId).catch(() => {});
+    stopCampaignProgressPolling();
     await loadCampaignHistory();
     return data;
   }
@@ -796,6 +859,7 @@
         }, "message");
         log(data.message, data.campaign.failed_count > 0 ? "error" : "success");
       } catch (err) {
+        stopCampaignProgressPolling();
         showTaskResultError("msg-result", err.message);
         log(`Campaign execution error: ${err.message}`, "error");
       } finally {

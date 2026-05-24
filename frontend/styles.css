@@ -353,7 +353,8 @@ code,pre { font-family: var(--font-mono); }
   color:var(--text-secondary);
 }
 .campaign-preview,
-.campaign-history {
+.campaign-history,
+.campaign-progress {
   margin-top:16px;
 }
 .campaign-preview__header {
@@ -379,18 +380,47 @@ code,pre { font-family: var(--font-mono); }
 }
 .campaign-preview__list,
 .campaign-history__list,
+.campaign-progress__list,
 .campaign-selection__list {
   display:flex;
   flex-direction:column;
   gap:8px;
 }
+.campaign-history__list {
+  max-height: 220px;
+  overflow-y: auto;
+}
 .campaign-contact,
 .campaign-history__item,
-.campaign-selection__item {
+.campaign-selection__item,
+.campaign-progress__item {
   padding:10px 12px;
   border:1px solid var(--border-subtle);
   border-radius:var(--radius-sm);
   background:rgba(0,0,0,0.15);
+}
+.campaign-progress__item {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  font-size:0.78rem;
+  color:var(--text-secondary);
+}
+.campaign-progress__item--success {
+  border-color:rgba(34,197,94,0.22);
+  background:rgba(34,197,94,0.06);
+}
+.campaign-progress__item--error {
+  border-color:rgba(239,68,68,0.25);
+  background:rgba(239,68,68,0.06);
+}
+.campaign-progress__route {
+  flex-shrink:0;
+  font-size:0.68rem;
+  font-weight:700;
+  text-transform:uppercase;
+  color:var(--text-muted);
 }
 .campaign-contact__row,
 .campaign-history__row,
