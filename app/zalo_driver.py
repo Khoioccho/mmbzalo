@@ -16,6 +16,7 @@ Full feature set:
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import random
@@ -28,6 +29,7 @@ from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserCon
 
 from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
 from app.models import (
+    AppSettings,
     CampaignContactPreview,
     LoginState,
     ContactInfo,
@@ -35,6 +37,7 @@ from app.models import (
     MessageResultItem,
     FriendRequestResultItem,
 )
+from app.proxy_config import parse_proxy_settings
 
 logger = logging.getLogger("zalo_driver")
 
@@ -43,6 +46,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 USER_DATA_DIR = os.path.join(BASE_DIR, "user_data")
 AUTH_STATE_DIR = os.path.join(BASE_DIR, "auth_state")
 SYNC_DEBUG_DIR = os.path.join(BASE_DIR, "debug_sync")
+SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
 SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SEND_DEBUG_ENABLED = (
     os.getenv("ZALO_SEND_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -162,6 +166,28 @@ class ZaloDriver:
             self._pw = sync_playwright().start()
             logger.info("Playwright started (sync_api, threaded).")
 
+    def _load_runtime_settings(self) -> AppSettings:
+        if not os.path.exists(SETTINGS_PATH):
+            return AppSettings()
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as settings_file:
+                return AppSettings(**json.load(settings_file))
+        except Exception as exc:
+            logger.warning(f"Failed to load settings for browser launch: {exc}")
+            return AppSettings()
+
+    def _get_launch_proxy_config(self) -> Optional[dict]:
+        settings = self._load_runtime_settings()
+        proxy_config = parse_proxy_settings(
+            proxy_enabled=settings.proxy_enabled,
+            proxy_raw=settings.proxy_raw,
+            proxy_address=settings.proxy_address,
+            proxy_port=settings.proxy_port,
+        )
+        if not proxy_config:
+            return None
+        return proxy_config.to_playwright_proxy()
+
     def _shutdown_sync(self):
         self._close_login_sync()
         self._close_worker_sync()
@@ -207,26 +233,35 @@ class ZaloDriver:
         self._close_login_sync()
 
         os.makedirs(USER_DATA_DIR, exist_ok=True)
+        proxy = self._get_launch_proxy_config()
+        if proxy:
+            logger.info(f"Launching login browser with proxy {proxy.get('server')}")
 
-        self._login_context = self._pw.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
-            channel="chrome",
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled", 
-                "--no-sandbox",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
-                "--disable-site-isolation-trials"
-            ],
-            viewport={"width": 1280, "height": 800},
-            locale="vi-VN",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
+        try:
+            self._login_context = self._pw.chromium.launch_persistent_context(
+                user_data_dir=USER_DATA_DIR,
+                channel="chrome",
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
+                    "--disable-site-isolation-trials"
+                ],
+                viewport={"width": 1280, "height": 800},
+                locale="vi-VN",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                proxy=proxy,
+            )
+        except Exception as exc:
+            if proxy:
+                logger.error(f"Login browser launch failed with proxy {proxy.get('server')}: {exc}")
+            raise
 
         self._login_page = (
             self._login_context.pages[0]
@@ -299,25 +334,34 @@ class ZaloDriver:
         self._ensure_pw()
 
         if os.path.exists(USER_DATA_DIR):
-            return self._pw.chromium.launch_persistent_context(
-                user_data_dir=USER_DATA_DIR,
-                channel="chrome",
-                headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled", 
-                    "--no-sandbox",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
-                    "--disable-site-isolation-trials"
-                ],
-                viewport={"width": 1440, "height": 900},
-                locale="vi-VN",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-            )
+            proxy = self._get_launch_proxy_config()
+            if proxy:
+                logger.info(f"Launching worker browser with proxy {proxy.get('server')}")
+            try:
+                return self._pw.chromium.launch_persistent_context(
+                    user_data_dir=USER_DATA_DIR,
+                    channel="chrome",
+                    headless=False,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-web-security",
+                        "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
+                        "--disable-site-isolation-trials"
+                    ],
+                    viewport={"width": 1440, "height": 900},
+                    locale="vi-VN",
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                    proxy=proxy,
+                )
+            except Exception as exc:
+                if proxy:
+                    logger.error(f"Worker browser launch failed with proxy {proxy.get('server')}: {exc}")
+                raise
 
         raise RuntimeError("No session profile available. Please log in first.")
 

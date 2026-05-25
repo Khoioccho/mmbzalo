@@ -123,6 +123,25 @@
     });
   }
 
+  function formatLegacyProxyValue(settings) {
+    if (settings.proxy_raw) return settings.proxy_raw;
+    if (settings.proxy_address && settings.proxy_port) {
+      return `${settings.proxy_address}:${settings.proxy_port}`;
+    }
+    return "";
+  }
+
+  async function readErrorMessage(res, fallback) {
+    try {
+      const data = await res.json();
+      if (typeof data.detail === "string" && data.detail) return data.detail;
+      if (Array.isArray(data.detail) && data.detail.length) {
+        return data.detail.map((item) => item.msg || fallback).join("; ");
+      }
+    } catch {}
+    return fallback;
+  }
+
   function esc(str) {
     const d = document.createElement("div");
     d.textContent = str ?? "";
@@ -1001,8 +1020,7 @@
       setToggle("toggle-layout", s.layout);
       $("#proxy-toggle").checked = s.proxy_enabled;
       $("#proxy-fields").style.display = s.proxy_enabled ? "block" : "none";
-      if (s.proxy_address) $("#proxy-address").value = s.proxy_address;
-      if (s.proxy_port) $("#proxy-port").value = s.proxy_port;
+      $("#proxy-raw").value = formatLegacyProxyValue(s);
       $("#setting-delay-min").value = s.delay_min;
       $("#setting-delay-max").value = s.delay_max;
     } catch {}
@@ -1029,8 +1047,9 @@
         theme: getToggle("toggle-theme"),
         layout: getToggle("toggle-layout"),
         proxy_enabled: $("#proxy-toggle").checked,
-        proxy_address: $("#proxy-address").value || null,
-        proxy_port: parseInt($("#proxy-port").value, 10) || null,
+        proxy_raw: $("#proxy-raw").value.trim() || null,
+        proxy_address: null,
+        proxy_port: null,
         delay_min: parseFloat($("#setting-delay-min").value) || 15,
         delay_max: parseFloat($("#setting-delay-max").value) || 30,
       };
@@ -1040,7 +1059,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(settings),
         });
-        if (res.ok) log("Settings saved.", "success");
+        if (!res.ok) {
+          throw new Error(await readErrorMessage(res, "Failed to save settings."));
+        }
+        const saved = await res.json();
+        $("#proxy-raw").value = formatLegacyProxyValue(saved);
+        log("Settings saved.", "success");
       } catch (err) {
         log(`Settings save error: ${err.message}`, "error");
       }

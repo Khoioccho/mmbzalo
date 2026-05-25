@@ -7,7 +7,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.proxy_config import parse_proxy_settings
 
 
 class LoginState(str, Enum):
@@ -277,7 +279,18 @@ class AppSettings(BaseModel):
     theme: str = Field("dark", description="'dark' or 'light'")
     layout: str = Field("vertical", description="'vertical' or 'horizontal'")
     proxy_enabled: bool = False
+    proxy_raw: Optional[str] = None
     proxy_address: Optional[str] = None
     proxy_port: Optional[int] = None
     delay_min: float = 15.0
     delay_max: float = 30.0
+
+    @model_validator(mode="after")
+    def validate_proxy_config(self) -> "AppSettings":
+        parse_proxy_settings(
+            proxy_enabled=self.proxy_enabled,
+            proxy_raw=self.proxy_raw,
+            proxy_address=self.proxy_address,
+            proxy_port=self.proxy_port,
+        )
+        return self
