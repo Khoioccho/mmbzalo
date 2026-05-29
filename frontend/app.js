@@ -9,13 +9,20 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
   let loginPollInterval = null;
+  let campaignProgressPollInterval = null;
+  let campaignProgressSeen = new Set();
   let lastCampaignPreview = null;
+  let campaignHistoryCache = [];
   const manualPickerState = {
     contacts: [],
     filtered: [],
     loaded: false,
     loading: false,
     error: "",
+  };
+  const campaignSelectionState = {
+    selectedContacts: [],
+    previewContacts: [],
   };
 
   async function checkHealth() {
@@ -43,6 +50,60 @@
     while (logEl.children.length > 50) logEl.lastChild.remove();
   }
 
+  function resetCampaignProgressUI(total = 0) {
+    campaignProgressSeen = new Set();
+    $("#campaign-progress").style.display = "block";
+    $("#campaign-progress-count").textContent = total ? `0/${total} sent` : "Starting";
+    $("#campaign-progress-list").innerHTML = '<div class="campaign-progress__item">Preparing campaign...</div>';
+  }
+
+  function appendCampaignProgressEvent(event) {
+    if (!event || campaignProgressSeen.has(event.sequence)) return;
+    campaignProgressSeen.add(event.sequence);
+    const list = $("#campaign-progress-list");
+    const preparing = list.querySelector(".campaign-progress__item");
+    if (preparing && preparing.textContent === "Preparing campaign...") preparing.remove();
+    const item = document.createElement("div");
+    item.className = `campaign-progress__item ${event.success === true ? "campaign-progress__item--success" : ""} ${event.success === false ? "campaign-progress__item--error" : ""}`;
+    const route = event.route ? `<span class="campaign-progress__route">${esc(event.route.replace("_", " "))}</span>` : "";
+    item.innerHTML = `<span>${esc(event.message || "")}</span>${route}`;
+    list.prepend(item);
+    while (list.children.length > 30) list.lastChild.remove();
+    if (event.message) log(event.message, event.level === "error" || event.success === false ? "error" : event.success === true ? "success" : "");
+  }
+
+  async function pollCampaignProgress(campaignId) {
+    const res = await fetch(`/api/campaigns/${campaignId}/progress`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed to load campaign progress.");
+    $("#campaign-progress").style.display = "block";
+    $("#campaign-progress-count").textContent = data.total ? `${data.sent}/${data.total} sent` : data.status;
+    (data.events || []).forEach(appendCampaignProgressEvent);
+    if (data.status === "completed" || data.status === "failed") {
+      stopCampaignProgressPolling();
+    }
+    return data;
+  }
+
+  function startCampaignProgressPolling(campaignId, total = 0) {
+    stopCampaignProgressPolling();
+    resetCampaignProgressUI(total);
+    pollCampaignProgress(campaignId).catch(() => {});
+    campaignProgressPollInterval = setInterval(() => {
+      pollCampaignProgress(campaignId).catch((err) => {
+        log(`Campaign progress error: ${err.message}`, "error");
+        stopCampaignProgressPolling();
+      });
+    }, 1000);
+  }
+
+  function stopCampaignProgressPolling() {
+    if (campaignProgressPollInterval) {
+      clearInterval(campaignProgressPollInterval);
+      campaignProgressPollInterval = null;
+    }
+  }
+
   function setContactsStatus(state, message) {
     const el = $("#contacts-status");
     el.className = `contacts-status contacts-status--${state}`;
@@ -60,6 +121,25 @@
     group.querySelectorAll(".toggle-btn").forEach((btn) => {
       btn.classList.toggle("toggle-btn--active", btn.dataset.value === value);
     });
+  }
+
+  function formatLegacyProxyValue(settings) {
+    if (settings.proxy_raw) return settings.proxy_raw;
+    if (settings.proxy_address && settings.proxy_port) {
+      return `${settings.proxy_address}:${settings.proxy_port}`;
+    }
+    return "";
+  }
+
+  async function readErrorMessage(res, fallback) {
+    try {
+      const data = await res.json();
+      if (typeof data.detail === "string" && data.detail) return data.detail;
+      if (Array.isArray(data.detail) && data.detail.length) {
+        return data.detail.map((item) => item.msg || fallback).join("; ");
+      }
+    } catch {}
+    return fallback;
   }
 
   function esc(str) {
@@ -292,7 +372,7 @@
     }
   }
 
-  function getCampaignFilters() {
+  function getCampaignDiscoveryFilters() {
     return {
       search: $("#campaign-search").value.trim() || null,
       unread_only: $("#campaign-unread-only").checked,
@@ -301,6 +381,76 @@
       sort_order: $("#campaign-sort-order").value,
       selected_ids: [],
     };
+  }
+
+  function getCampaignFilters() {
+    return {
+      ...getCampaignDiscoveryFilters(),
+      selected_ids: campaignSelectionState.selectedContacts.map((contact) => contact.identity_key).filter(Boolean),
+    };
+  }
+
+  function setCampaignFilters(filters = {}) {
+    $("#campaign-search").value = filters.search || "";
+    $("#campaign-unread-only").checked = Boolean(filters.unread_only);
+    $("#campaign-identity-source").value = filters.identity_source || "all";
+    $("#campaign-sort-by").value = filters.sort_by || "name";
+    $("#campaign-sort-order").value = filters.sort_order || "asc";
+  }
+
+  function addCampaignContacts(contacts) {
+    const existing = new Map(campaignSelectionState.selectedContacts.map((contact) => [contact.identity_key, contact]));
+    let added = 0;
+    for (const contact of contacts) {
+      if (!contact || !contact.identity_key || existing.has(contact.identity_key)) continue;
+      existing.set(contact.identity_key, contact);
+      added += 1;
+    }
+    campaignSelectionState.selectedContacts = Array.from(existing.values());
+    renderCampaignSelection();
+    renderCampaignPreview(campaignSelectionState.previewContacts);
+    return added;
+  }
+
+  function removeCampaignContact(identityKey) {
+    campaignSelectionState.selectedContacts = campaignSelectionState.selectedContacts.filter(
+      (contact) => contact.identity_key !== identityKey,
+    );
+    renderCampaignSelection();
+    renderCampaignPreview(campaignSelectionState.previewContacts);
+  }
+
+  function clearCampaignSelection() {
+    campaignSelectionState.selectedContacts = [];
+    renderCampaignSelection();
+    renderCampaignPreview(campaignSelectionState.previewContacts);
+  }
+
+  function renderCampaignSelection() {
+    const list = $("#campaign-selection-list");
+    const count = $("#campaign-selected-count");
+    const contacts = campaignSelectionState.selectedContacts;
+    count.textContent = `${contacts.length} selected`;
+
+    if (!contacts.length) {
+      list.innerHTML = '<p class="field-hint">No campaign recipients selected yet. Preview matches, then add the contacts you want.</p>';
+      return;
+    }
+
+    list.innerHTML = contacts.map((contact) => `
+      <div class="campaign-selection__item">
+        <div class="campaign-selection__row">
+          <div class="campaign-selection__meta">
+            <span class="campaign-selection__name">${esc(contact.name)}</span>
+            <span class="campaign-selection__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
+          </div>
+          <div class="campaign-selection__actions-inline">
+            <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : "campaign-pill--muted"}">${contact.unread ? "Unread" : "Seen"}</span>
+            <button class="btn btn--secondary btn--sm" type="button" data-campaign-remove="${esc(contact.identity_key)}">Remove</button>
+          </div>
+        </div>
+      </div>
+    `).join("");
   }
 
   function buildContactsQuery(filters) {
@@ -315,13 +465,14 @@
   }
 
   async function previewCampaignMatches() {
-    const filters = getCampaignFilters();
+    const filters = getCampaignDiscoveryFilters();
     const query = buildContactsQuery(filters);
     const res = await fetch(`/api/contacts${query ? `?${query}` : ""}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed");
-    lastCampaignPreview = { filters, contacts: data.contacts || [], storedContactCount: data.stored_contact_count || 0 };
-    renderCampaignPreview(lastCampaignPreview.contacts);
+    campaignSelectionState.previewContacts = data.contacts || [];
+    lastCampaignPreview = { filters, contacts: campaignSelectionState.previewContacts, storedContactCount: data.stored_contact_count || 0 };
+    renderCampaignPreview(campaignSelectionState.previewContacts);
     return lastCampaignPreview;
   }
 
@@ -329,6 +480,7 @@
     const preview = $("#campaign-preview");
     const list = $("#campaign-preview-list");
     const count = $("#campaign-preview-count");
+    const selectedIds = new Set(campaignSelectionState.selectedContacts.map((contact) => contact.identity_key));
     preview.style.display = "block";
     count.textContent = `${contacts.length} match(es)`;
     if (!contacts.length) {
@@ -342,7 +494,10 @@
             <span class="campaign-contact__name">${esc(contact.name)}</span>
             <span class="campaign-contact__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
           </div>
-          <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : ""}">${contact.unread ? "Unread" : "Seen"}</span>
+          <div class="campaign-contact__actions">
+            <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : "campaign-pill--muted"}">${contact.unread ? "Unread" : "Seen"}</span>
+            <button class="btn btn--secondary btn--sm" type="button" data-campaign-add="${esc(contact.identity_key)}">${selectedIds.has(contact.identity_key) ? "Added" : "Add"}</button>
+          </div>
         </div>
       </div>
     `).join("");
@@ -356,25 +511,50 @@
       const res = await fetch("/api/campaigns");
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed");
+      campaignHistoryCache = data.campaigns || [];
       const list = $("#campaign-history-list");
-      if (!data.campaigns || data.campaigns.length === 0) {
+      if (!campaignHistoryCache.length) {
         list.innerHTML = '<p class="field-hint">No campaigns yet.</p>';
         return;
       }
-      list.innerHTML = data.campaigns.map((campaign) => `
+      const visibleCampaigns = campaignHistoryCache.slice(0, 4);
+      list.innerHTML = visibleCampaigns.map((campaign) => `
         <div class="campaign-history__item">
           <div class="campaign-history__row">
             <div class="campaign-history__meta">
               <span class="campaign-history__name">${esc(campaign.name)}</span>
-              <span class="campaign-history__sub">${esc(campaign.status)} | ${campaign.matched_count} matched | ${formatTimestamp(campaign.created_at)}</span>
+              <span class="campaign-history__sub">${esc(campaign.status)} | ${campaign.selected_contact_ids?.length || campaign.matched_count} selected | ${formatTimestamp(campaign.created_at)}</span>
             </div>
-            <span class="campaign-pill ${campaign.failed_count > 0 ? "campaign-pill--warn" : "campaign-pill--ok"}">${campaign.sent_count}/${campaign.matched_count}</span>
+            <div class="campaign-history__actions">
+              <span class="campaign-pill ${campaign.failed_count > 0 ? "campaign-pill--warn" : "campaign-pill--ok"}">${campaign.sent_count}/${campaign.matched_count}</span>
+              <button class="btn btn--secondary btn--sm" type="button" data-campaign-load="${campaign.campaign_id}">Load</button>
+            </div>
           </div>
         </div>
       `).join("");
+      if (campaignHistoryCache.length > visibleCampaigns.length) {
+        list.insertAdjacentHTML("beforeend", `<p class="field-hint">Showing latest ${visibleCampaigns.length} of ${campaignHistoryCache.length} campaigns.</p>`);
+      }
     } catch (err) {
       log(`Campaign history load error: ${err.message}`, "error");
     }
+  }
+
+  function loadCampaignIntoBuilder(campaignId) {
+    const campaign = campaignHistoryCache.find((item) => Number(item.campaign_id) === Number(campaignId));
+    if (!campaign) {
+      log("Campaign not found in history.", "error");
+      return;
+    }
+
+    $("#campaign-name").value = campaign.name || "";
+    $("#msg-content").value = campaign.message || "";
+    setCampaignFilters(campaign.filters || {});
+    campaignSelectionState.selectedContacts = (campaign.matched_contacts || []).slice();
+    renderCampaignSelection();
+    campaignSelectionState.previewContacts = [];
+    $("#campaign-preview").style.display = "none";
+    log(`Loaded campaign '${campaign.name}' into the builder.`, "success");
   }
 
   async function createCampaignDraft() {
@@ -382,14 +562,17 @@
     const message = $("#msg-content").value.trim();
     if (!name) throw new Error("Campaign name is required.");
     if (!message) throw new Error("Campaign message cannot be empty.");
-    const preview = await previewCampaignMatches();
+    if (!campaignSelectionState.selectedContacts.length) {
+      throw new Error("Select at least one campaign recipient before saving.");
+    }
+    const filters = getCampaignFilters();
     const res = await fetch("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name,
         message,
-        filters: preview.filters,
+        filters,
       }),
     });
     const data = await res.json();
@@ -400,16 +583,22 @@
 
   async function executeCampaignDraft() {
     const campaignResult = await createCampaignDraft();
-    const delayMin = parseFloat($("#msg-delay-min").value) || 15;
-    const delayMax = parseFloat($("#msg-delay-max").value) || 30;
+    const delayMin = parseFloat($("#campaign-delay-min").value);
+    const delayMax = parseFloat($("#campaign-delay-max").value);
     const campaignId = campaignResult.campaign.campaign_id;
+    startCampaignProgressPolling(campaignId, campaignResult.campaign.matched_count || 0);
     const res = await fetch(`/api/campaigns/${campaignId}/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ delay_min: delayMin, delay_max: delayMax }),
+      body: JSON.stringify({
+        delay_min: Number.isFinite(delayMin) ? delayMin : 1,
+        delay_max: Number.isFinite(delayMax) ? delayMax : 3,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed");
+    await pollCampaignProgress(campaignId).catch(() => {});
+    stopCampaignProgressPolling();
     await loadCampaignHistory();
     return data;
   }
@@ -531,6 +720,14 @@
       openManualPicker();
     });
 
+    $("#btn-clear-msg-targets").addEventListener("click", () => {
+      const textarea = $("#msg-targets");
+      if (!textarea.value.trim()) return;
+      textarea.value = "";
+      renderManualPickerList();
+      log("Cleared manual target list.");
+    });
+
     $("#btn-close-contact-picker").addEventListener("click", () => {
       closeManualPicker();
     });
@@ -561,6 +758,54 @@
       if (event.key === "Escape" && $("#contact-picker-modal").style.display !== "none") {
         closeManualPicker();
       }
+    });
+
+    $("#campaign-preview-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-campaign-add]");
+      if (!btn) return;
+      const identityKey = btn.dataset.campaignAdd;
+      const contact = campaignSelectionState.previewContacts.find((item) => item.identity_key === identityKey);
+      if (!contact) return;
+      const added = addCampaignContacts([contact]);
+      log(
+        added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`,
+        added ? "success" : ""
+      );
+    });
+
+    $("#campaign-selection-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-campaign-remove]");
+      if (!btn) return;
+      const identityKey = btn.dataset.campaignRemove;
+      const contact = campaignSelectionState.selectedContacts.find((item) => item.identity_key === identityKey);
+      removeCampaignContact(identityKey);
+      if (contact) {
+        log(`Removed '${contact.name}' from campaign recipients.`);
+      }
+    });
+
+    $("#campaign-history-list").addEventListener("click", (event) => {
+      const btn = event.target.closest("button[data-campaign-load]");
+      if (!btn) return;
+      loadCampaignIntoBuilder(btn.dataset.campaignLoad);
+    });
+
+    $("#btn-campaign-clear-selection").addEventListener("click", () => {
+      if (!campaignSelectionState.selectedContacts.length) return;
+      clearCampaignSelection();
+      log("Cleared campaign recipient selection.");
+    });
+
+    $("#btn-campaign-add-all").addEventListener("click", () => {
+      if (!campaignSelectionState.previewContacts.length) {
+        log("Preview matches first, then add contacts to the campaign.", "error");
+        return;
+      }
+      const added = addCampaignContacts(campaignSelectionState.previewContacts);
+      log(
+        added > 0 ? `Added ${added} contact(s) to campaign recipients.` : "All previewed contacts are already selected.",
+        added > 0 ? "success" : ""
+      );
     });
 
     $("#btn-msg-send").addEventListener("click", async () => {
@@ -633,6 +878,7 @@
         }, "message");
         log(data.message, data.campaign.failed_count > 0 ? "error" : "success");
       } catch (err) {
+        stopCampaignProgressPolling();
         showTaskResultError("msg-result", err.message);
         log(`Campaign execution error: ${err.message}`, "error");
       } finally {
@@ -774,8 +1020,7 @@
       setToggle("toggle-layout", s.layout);
       $("#proxy-toggle").checked = s.proxy_enabled;
       $("#proxy-fields").style.display = s.proxy_enabled ? "block" : "none";
-      if (s.proxy_address) $("#proxy-address").value = s.proxy_address;
-      if (s.proxy_port) $("#proxy-port").value = s.proxy_port;
+      $("#proxy-raw").value = formatLegacyProxyValue(s);
       $("#setting-delay-min").value = s.delay_min;
       $("#setting-delay-max").value = s.delay_max;
     } catch {}
@@ -802,8 +1047,9 @@
         theme: getToggle("toggle-theme"),
         layout: getToggle("toggle-layout"),
         proxy_enabled: $("#proxy-toggle").checked,
-        proxy_address: $("#proxy-address").value || null,
-        proxy_port: parseInt($("#proxy-port").value, 10) || null,
+        proxy_raw: $("#proxy-raw").value.trim() || null,
+        proxy_address: null,
+        proxy_port: null,
         delay_min: parseFloat($("#setting-delay-min").value) || 15,
         delay_max: parseFloat($("#setting-delay-max").value) || 30,
       };
@@ -813,7 +1059,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(settings),
         });
-        if (res.ok) log("Settings saved.", "success");
+        if (!res.ok) {
+          throw new Error(await readErrorMessage(res, "Failed to save settings."));
+        }
+        const saved = await res.json();
+        $("#proxy-raw").value = formatLegacyProxyValue(saved);
+        log("Settings saved.", "success");
       } catch (err) {
         log(`Settings save error: ${err.message}`, "error");
       }
@@ -832,6 +1083,7 @@
     await loadSettings();
     await loadStoredContacts();
     await loadCampaignHistory();
+    renderCampaignSelection();
     setMessageMode("manual");
   }
 

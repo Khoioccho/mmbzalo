@@ -7,7 +7,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.proxy_config import parse_proxy_settings
 
 
 class LoginState(str, Enum):
@@ -135,8 +137,8 @@ class CampaignDraftPayload(BaseModel):
 
 
 class CampaignExecutePayload(BaseModel):
-    delay_min: float = Field(15.0, description="Min delay between sends (seconds).")
-    delay_max: float = Field(30.0, description="Max delay between sends (seconds).")
+    delay_min: float = Field(1.0, description="Min delay between campaign sends (seconds).")
+    delay_max: float = Field(3.0, description="Max delay between campaign sends (seconds).")
 
 
 class CampaignResultItem(BaseModel):
@@ -172,6 +174,27 @@ class CampaignListResult(BaseModel):
 class CampaignOperationResult(BaseModel):
     campaign: CampaignInfo
     message: str = ""
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class CampaignProgressEvent(BaseModel):
+    sequence: int
+    message: str
+    level: str = "info"
+    target: Optional[str] = None
+    route: Optional[str] = None
+    success: Optional[bool] = None
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class CampaignProgressResult(BaseModel):
+    campaign_id: int
+    status: str = "idle"
+    total: int = 0
+    sent: int = 0
+    failed: int = 0
+    current: Optional[str] = None
+    events: list[CampaignProgressEvent] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -256,7 +279,18 @@ class AppSettings(BaseModel):
     theme: str = Field("dark", description="'dark' or 'light'")
     layout: str = Field("vertical", description="'vertical' or 'horizontal'")
     proxy_enabled: bool = False
+    proxy_raw: Optional[str] = None
     proxy_address: Optional[str] = None
     proxy_port: Optional[int] = None
     delay_min: float = 15.0
     delay_max: float = 30.0
+
+    @model_validator(mode="after")
+    def validate_proxy_config(self) -> "AppSettings":
+        parse_proxy_settings(
+            proxy_enabled=self.proxy_enabled,
+            proxy_raw=self.proxy_raw,
+            proxy_address=self.proxy_address,
+            proxy_port=self.proxy_port,
+        )
+        return self

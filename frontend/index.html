@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=20260520-manual-picker-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260524-campaign-curation-1" />
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -119,6 +119,10 @@
                       <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 2a1 1 0 0 0 0 2h2a1 1 0 1 0 0-2h-2z"/><path fill-rule="evenodd" d="M5 5a2 2 0 0 1 2-2 3 3 0 0 0 3 3h2a3 3 0 0 0 3-3 2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5zm3 3a1 1 0 0 0 0 2h5a1 1 0 1 0 0-2H8zm0 4a1 1 0 1 0 0 2h5a1 1 0 1 0 0-2H8z" clip-rule="evenodd"/></svg>
                       Choose From Contacts
                     </button>
+                    <button class="btn btn--secondary btn--sm" id="btn-clear-msg-targets" type="button">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M6 2a1 1 0 0 0-.894.553L4.382 4H2a1 1 0 1 0 0 2h1l.8 9.607A2 2 0 0 0 5.793 17h8.414a2 2 0 0 0 1.993-1.393L17 6h1a1 1 0 1 0 0-2h-2.382l-.724-1.447A1 1 0 0 0 14 2H6zm2 5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0V8a1 1 0 0 1 1-1zm5 1a1 1 0 1 0-2 0v5a1 1 0 1 0 2 0V8z" clip-rule="evenodd"/></svg>
+                      Clear Target List
+                    </button>
                   </div>
                 </div>
 
@@ -163,10 +167,36 @@
                       <span>Unread contacts only</span>
                     </label>
                   </div>
+                  <div class="field-row">
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-delay-min">Campaign Min Delay (s)</label>
+                      <input type="number" id="campaign-delay-min" class="field-input" value="1" min="0" max="120" />
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="campaign-delay-max">Campaign Max Delay (s)</label>
+                      <input type="number" id="campaign-delay-max" class="field-input" value="3" min="0" max="120" />
+                    </div>
+                  </div>
+                  <div class="campaign-selection">
+                    <div class="campaign-preview__header">
+                      <span class="campaign-preview__title">Selected Recipients</span>
+                      <span class="campaign-preview__count" id="campaign-selected-count">0 selected</span>
+                    </div>
+                    <div class="campaign-selection__actions">
+                      <button class="btn btn--secondary btn--sm" id="btn-campaign-clear-selection" type="button">Clear Selected</button>
+                    </div>
+                    <div class="campaign-selection__list" id="campaign-selection-list">
+                      <p class="field-hint">No campaign recipients selected yet. Preview matches, then add the contacts you want.</p>
+                    </div>
+                  </div>
                   <div class="actions">
                     <button class="btn btn--secondary" id="btn-campaign-preview">
                       <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 3C5 3 1.73 7.11.46 9.11a1.59 1.59 0 0 0 0 1.78C1.73 12.89 5 17 10 17s8.27-4.11 9.54-6.11a1.59 1.59 0 0 0 0-1.78C18.27 7.11 15 3 10 3zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg>
                       Preview Matches
+                    </button>
+                    <button class="btn btn--secondary" id="btn-campaign-add-all" type="button">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm3.707-9.707a1 1 0 0 0-1.414-1.414L9 10.172 7.707 8.879a1 1 0 0 0-1.414 1.414l2 2a1 1 0 0 0 1.414 0l4-4z" clip-rule="evenodd"/></svg>
+                      Add All Matches
                     </button>
                     <button class="btn btn--secondary" id="btn-campaign-save">
                       <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.414A2 2 0 0 0 17.414 6L14 2.586A2 2 0 0 0 12.586 2H4zm6 1v4H6V4h4z"/></svg>
@@ -176,6 +206,13 @@
                       <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
                       Save + Execute
                     </button>
+                  </div>
+                  <div class="campaign-progress" id="campaign-progress" style="display:none;">
+                    <div class="campaign-preview__header">
+                      <span class="campaign-preview__title">Campaign Progress</span>
+                      <span class="campaign-preview__count" id="campaign-progress-count"></span>
+                    </div>
+                    <div class="campaign-progress__list" id="campaign-progress-list"></div>
                   </div>
                   <div class="campaign-preview" id="campaign-preview" style="display:none;">
                     <div class="campaign-preview__header">
@@ -379,7 +416,7 @@
             <div class="setting-item">
               <div class="setting-info">
                 <span class="setting-label">Proxy</span>
-                <span class="setting-desc">IP rotation for bulk actions</span>
+                <span class="setting-desc">Routes browser traffic for login, sync, and sends. Applies after browser restart.</span>
               </div>
               <label class="switch">
                 <input type="checkbox" id="proxy-toggle" />
@@ -388,15 +425,10 @@
             </div>
 
             <div class="proxy-fields" id="proxy-fields" style="display:none;">
-              <div class="field-row">
-                <div class="field-group">
-                  <label class="field-label" for="proxy-address">Address</label>
-                  <input type="text" id="proxy-address" class="field-input" placeholder="192.168.1.1" />
-                </div>
-                <div class="field-group">
-                  <label class="field-label" for="proxy-port">Port</label>
-                  <input type="number" id="proxy-port" class="field-input" placeholder="8080" />
-                </div>
+              <div class="field-group">
+                <label class="field-label" for="proxy-raw">Proxy Value</label>
+                <input type="text" id="proxy-raw" class="field-input" placeholder="login:password@hostname:port" />
+                <div class="setting-desc">Accepted examples: hostname:port, login:password@hostname:port, protocol://login:password@hostname:port</div>
               </div>
             </div>
 
@@ -469,6 +501,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260520-manual-picker-1"></script>
+  <script src="/static/app.js?v=20260524-campaign-curation-1"></script>
 </body>
 </html>

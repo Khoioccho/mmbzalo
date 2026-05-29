@@ -6,6 +6,8 @@ Full feature set: Login, Messaging, Friend Requests, Groups, Contacts, Settings.
 import json
 import logging
 import os
+import threading
+from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -18,6 +20,7 @@ from app.models import (
     CampaignExecutePayload,
     CampaignListResult,
     CampaignOperationResult,
+    CampaignProgressResult,
     ContactQueryParams,
     LoginStatus,
     ContactListResult,
@@ -38,6 +41,101 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-16s  %(levelname)-7s  %(message)s",
 )
 logger = logging.getLogger("api")
+
+_campaign_progress_lock = threading.Lock()
+_campaign_progress: dict[int, dict] = {}
+
+
+def _reset_campaign_progress(campaign_id: int, total: int) -> None:
+    with _campaign_progress_lock:
+        _campaign_progress[campaign_id] = {
+            "campaign_id": campaign_id,
+            "status": "running",
+            "total": total,
+            "sent": 0,
+            "failed": 0,
+            "current": None,
+            "sequence": 0,
+            "events": [],
+        }
+
+
+def _record_campaign_progress(campaign_id: int, event: dict) -> None:
+    with _campaign_progress_lock:
+        state = _campaign_progress.setdefault(
+            campaign_id,
+            {
+                "campaign_id": campaign_id,
+                "status": "running",
+                "total": 0,
+                "sent": 0,
+                "failed": 0,
+                "current": None,
+                "sequence": 0,
+                "events": [],
+            },
+        )
+        state["sequence"] += 1
+        event_type = event.get("event")
+        target = event.get("target")
+        if event_type == "target_start":
+            state["current"] = target
+        elif event_type == "target_done":
+            if event.get("success"):
+                state["sent"] += 1
+            else:
+                state["failed"] += 1
+        elif event_type == "complete":
+            state["status"] = "completed"
+            state["current"] = None
+
+        state["events"].append(
+            {
+                "sequence": state["sequence"],
+                "timestamp": datetime.utcnow().isoformat(),
+                "level": event.get("level", "info"),
+                "message": event.get("message", ""),
+                "target": target,
+                "route": event.get("route"),
+                "success": event.get("success"),
+            }
+        )
+        state["events"] = state["events"][-200:]
+
+
+def _fail_campaign_progress(campaign_id: int, message: str) -> None:
+    with _campaign_progress_lock:
+        state = _campaign_progress.setdefault(
+            campaign_id,
+            {
+                "campaign_id": campaign_id,
+                "status": "failed",
+                "total": 0,
+                "sent": 0,
+                "failed": 0,
+                "current": None,
+                "sequence": 0,
+                "events": [],
+            },
+        )
+        state["status"] = "failed"
+    _record_campaign_progress(campaign_id, {"event": "failed", "level": "error", "message": message})
+
+
+def _get_campaign_progress_snapshot(campaign_id: int) -> dict:
+    with _campaign_progress_lock:
+        state = _campaign_progress.get(campaign_id)
+        if not state:
+            return {"campaign_id": campaign_id, "status": "idle", "events": []}
+        return {
+            "campaign_id": state["campaign_id"],
+            "status": state["status"],
+            "total": state["total"],
+            "sent": state["sent"],
+            "failed": state["failed"],
+            "current": state["current"],
+            "events": list(state["events"]),
+        }
 
 # ─── Settings file path ─────────────────────────────────────────
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
@@ -205,6 +303,8 @@ async def create_campaign(payload: CampaignDraftPayload):
         raise HTTPException(400, "Campaign name is required.")
     if not payload.message.strip():
         raise HTTPException(400, "Campaign message cannot be empty.")
+    if not payload.filters.selected_ids:
+        raise HTTPException(400, "Select at least one campaign recipient before saving.")
     try:
         campaign = contact_store.create_campaign(payload)
         return CampaignOperationResult(
@@ -227,6 +327,12 @@ async def list_campaigns():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/campaigns/{campaign_id}/progress", response_model=CampaignProgressResult)
+async def get_campaign_progress(campaign_id: int):
+    """Return live progress for a running or recently completed campaign."""
+    return CampaignProgressResult(**_get_campaign_progress_snapshot(campaign_id))
+
+
 @app.post("/api/campaigns/{campaign_id}/execute", response_model=CampaignOperationResult)
 async def execute_campaign(campaign_id: int, payload: CampaignExecutePayload):
     """Execute a saved campaign through the existing messaging driver."""
@@ -239,14 +345,16 @@ async def execute_campaign(campaign_id: int, payload: CampaignExecutePayload):
     try:
         prepared = contact_store.prepare_campaign_execution(campaign_id)
         campaign = prepared["campaign"]
-        targets = prepared["targets"]
-        if not targets:
+        matched_contacts = prepared["matched_contacts"]
+        if not matched_contacts:
             raise HTTPException(400, "Campaign has no matched contacts to execute.")
-        send_result = await driver.send_messages(
-            targets=targets,
+        _reset_campaign_progress(campaign_id, len(matched_contacts))
+        send_result = await driver.send_campaign_messages(
+            contacts=matched_contacts,
             message=campaign.message,
             delay_min=payload.delay_min,
             delay_max=payload.delay_max,
+            progress_callback=lambda event: _record_campaign_progress(campaign_id, event),
         )
         updated_campaign = contact_store.finalize_campaign_execution(
             campaign_id=campaign_id,
@@ -263,6 +371,7 @@ async def execute_campaign(campaign_id: int, payload: CampaignExecutePayload):
         raise HTTPException(404, str(e))
     except Exception as e:
         logger.exception("Campaign execution failed")
+        _fail_campaign_progress(campaign_id, str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
