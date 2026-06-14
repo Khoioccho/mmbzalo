@@ -3,10 +3,10 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-
+from pydantic import field_validator
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
+import json
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -37,6 +37,30 @@ class Settings(BaseSettings):
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
 
     cors_allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:8000"])
+
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def parse_cors_allowed_origins(cls, value):
+        if value is None or value == "":
+            return ["http://localhost:8000"]
+
+        if isinstance(value, list):
+            return value
+
+        if isinstance(value, str):
+            value = value.strip()
+
+            # Supports JSON-style env var:
+            # MMBZALO_CORS_ALLOWED_ORIGINS='["http://localhost:8000","http://103.216.118.156"]'
+            if value.startswith("["):
+                return json.loads(value)
+
+            # Supports comma-separated env var:
+            # MMBZALO_CORS_ALLOWED_ORIGINS=http://localhost:8000,http://103.216.118.156
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+        return value
+
     host_identity: str = "local-dev"
     browser_profiles_root: Path = BASE_DIR / "runtime" / "profiles"
     login_display: str = ":99"
