@@ -1,251 +1,307 @@
 """
-FastAPI application — MMBZalo Automation Tool
-Full feature set: Login, Messaging, Friend Requests, Groups, Contacts, Settings.
+FastAPI application for the PostgreSQL-backed multi-workspace MMBZalo service.
 """
 
-import json
+from __future__ import annotations
+
 import logging
-import os
-import threading
-from datetime import datetime
 from contextlib import asynccontextmanager
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
+from app.api_models import (
+    AuthSessionResult,
+    CancelJobResult,
+    JobListResult,
+    JobResult,
+    JobSubmissionResult,
+    LoginRequest,
+    ReadinessResult,
+    WorkspaceSessionResult,
+    WorkspaceSummary,
+    WorkspaceSwitchResult,
+)
+from app.config import get_settings
+from app.database import get_db, session_scope
+from app.db_models import AuditActorType, CampaignStatus, JobType, MembershipRole
+from app.dependencies import RequestContext, get_request_context, require_role
 from app.models import (
+    AppSettings,
     CampaignDraftPayload,
     CampaignExecutePayload,
     CampaignListResult,
     CampaignOperationResult,
     CampaignProgressResult,
-    ContactQueryParams,
-    LoginStatus,
     ContactListResult,
+    ContactQueryParams,
     ContactSyncRunListResult,
-    MessagePayload,
-    MessageResult,
     FriendRequestPayload,
-    FriendRequestResult,
     GroupMessagePayload,
-    GroupResult,
-    AppSettings,
+    LoginStatus,
+    MessagePayload,
 )
-from app.contact_store import contact_store
-from app.zalo_driver import get_driver
+from app.services import (
+    authenticate_user,
+    build_auth_session_result,
+    cancel_job,
+    create_auth_session,
+    create_campaign,
+    create_job,
+    ensure_workspace_session,
+    get_campaign,
+    get_campaign_progress,
+    get_job,
+    get_readiness,
+    get_workspace_runtime_settings,
+    get_workspace_session_result,
+    get_workspace_settings,
+    list_campaigns,
+    list_contacts,
+    list_jobs,
+    list_sync_runs,
+    record_audit_log,
+    resolve_auth_session,
+    revoke_auth_session,
+    switch_active_workspace,
+    update_workspace_login_status,
+    update_workspace_settings,
+)
+from app.zalo_driver import get_driver, shutdown_all_drivers
+
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(name)-16s  %(levelname)-7s  %(message)s",
 )
 logger = logging.getLogger("api")
-
-_campaign_progress_lock = threading.Lock()
-_campaign_progress: dict[int, dict] = {}
+settings = get_settings()
 
 
-def _reset_campaign_progress(campaign_id: int, total: int) -> None:
-    with _campaign_progress_lock:
-        _campaign_progress[campaign_id] = {
-            "campaign_id": campaign_id,
-            "status": "running",
-            "total": total,
-            "sent": 0,
-            "failed": 0,
-            "current": None,
-            "sequence": 0,
-            "events": [],
-        }
+def _cookie_value(request: Request) -> str | None:
+    return request.cookies.get(settings.session_cookie_name)
 
 
-def _record_campaign_progress(campaign_id: int, event: dict) -> None:
-    with _campaign_progress_lock:
-        state = _campaign_progress.setdefault(
-            campaign_id,
-            {
-                "campaign_id": campaign_id,
-                "status": "running",
-                "total": 0,
-                "sent": 0,
-                "failed": 0,
-                "current": None,
-                "sequence": 0,
-                "events": [],
-            },
-        )
-        state["sequence"] += 1
-        event_type = event.get("event")
-        target = event.get("target")
-        if event_type == "target_start":
-            state["current"] = target
-        elif event_type == "target_done":
-            if event.get("success"):
-                state["sent"] += 1
-            else:
-                state["failed"] += 1
-        elif event_type == "complete":
-            state["status"] = "completed"
-            state["current"] = None
+def _driver_settings_provider(workspace_id: UUID):
+    def provider() -> AppSettings:
+        with session_scope() as db:
+            return get_workspace_runtime_settings(db, workspace_id)
 
-        state["events"].append(
-            {
-                "sequence": state["sequence"],
-                "timestamp": datetime.utcnow().isoformat(),
-                "level": event.get("level", "info"),
-                "message": event.get("message", ""),
-                "target": target,
-                "route": event.get("route"),
-                "success": event.get("success"),
-            }
-        )
-        state["events"] = state["events"][-200:]
+    return provider
 
 
-def _fail_campaign_progress(campaign_id: int, message: str) -> None:
-    with _campaign_progress_lock:
-        state = _campaign_progress.setdefault(
-            campaign_id,
-            {
-                "campaign_id": campaign_id,
-                "status": "failed",
-                "total": 0,
-                "sent": 0,
-                "failed": 0,
-                "current": None,
-                "sequence": 0,
-                "events": [],
-            },
-        )
-        state["status"] = "failed"
-    _record_campaign_progress(campaign_id, {"event": "failed", "level": "error", "message": message})
+async def _workspace_driver(workspace_id: UUID) -> object:
+    with session_scope() as db:
+        session_row = ensure_workspace_session(db, workspace_id)
+        profile_path = session_row.profile_path
+    return await get_driver(str(workspace_id), profile_path, _driver_settings_provider(workspace_id))
 
-
-def _get_campaign_progress_snapshot(campaign_id: int) -> dict:
-    with _campaign_progress_lock:
-        state = _campaign_progress.get(campaign_id)
-        if not state:
-            return {"campaign_id": campaign_id, "status": "idle", "events": []}
-        return {
-            "campaign_id": state["campaign_id"],
-            "status": state["status"],
-            "total": state["total"],
-            "sent": state["sent"],
-            "failed": state["failed"],
-            "current": state["current"],
-            "events": list(state["events"]),
-        }
-
-# ─── Settings file path ─────────────────────────────────────────
-SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
-
-_settings = AppSettings()
-
-
-def _load_settings():
-    global _settings
-    if os.path.exists(SETTINGS_PATH):
-        try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                _settings = AppSettings(**json.load(f))
-        except Exception:
-            _settings = AppSettings()
-
-
-def _save_settings():
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(_settings.model_dump(), f, indent=2)
-
-
-# ─── App lifecycle ───────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _load_settings()
-    contact_store.initialize()
-    logger.info("MMBZalo Automation Tool started.")
+    logger.info("MMBZalo production service started.")
     yield
-    driver = await get_driver()
-    await driver.shutdown()
+    await shutdown_all_drivers()
     logger.info("Shut down complete.")
 
 
 app = FastAPI(
-    title="MMBZalo Automation Tool",
-    description="Zalo Automation — Login, Messaging, Friends, Groups",
-    version="0.2.0",
+    title=settings.app_name,
+    version=settings.app_version,
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve frontend
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
+app.mount("/static", StaticFiles(directory=str(settings.frontend_dir)), name="static")
 
-
-# ═════════════════════════════════════════════════════════════════
-#  PAGES
-# ═════════════════════════════════════════════════════════════════
 
 @app.get("/")
 async def root():
-    return FileResponse("frontend/index.html")
+    return FileResponse(str(settings.frontend_dir / "index.html"))
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": settings.app_version}
 
 
-# ═════════════════════════════════════════════════════════════════
-#  LOGIN
-# ═════════════════════════════════════════════════════════════════
-
-@app.post("/api/login/start", response_model=LoginStatus)
-async def login_start():
-    """Open a visible Chromium window for Zalo QR/phone login."""
-    driver = await get_driver()
+@app.get("/api/readiness", response_model=ReadinessResult)
+async def readiness(db: Session = Depends(get_db)):
     try:
-        result = await driver.start_login()
-        return LoginStatus(**result)
-    except Exception as e:
-        logger.exception("Login start failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        db.execute(text("SELECT 1"))
+        return get_readiness(db)
+    except Exception as exc:
+        logger.exception("Readiness check failed")
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/auth/login", response_model=AuthSessionResult)
+async def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    user = authenticate_user(db, payload.email, payload.password)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
+    token, auth_session = create_auth_session(
+        db,
+        user,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    result = build_auth_session_result(db, auth_session, user)
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        domain=settings.cookie_domain,
+        max_age=settings.session_ttl_hours * 3600,
+        path="/",
+    )
+    record_audit_log(
+        db,
+        action="auth.login",
+        entity_type="user",
+        entity_id=str(user.id),
+        actor_type=AuditActorType.USER,
+        actor_user_id=user.id,
+        metadata={"email": user.email},
+    )
+    return result
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    resolved = resolve_auth_session(db, _cookie_value(request))
+    if resolved:
+        auth_session, user = resolved
+        revoke_auth_session(db, auth_session)
+        record_audit_log(
+            db,
+            action="auth.logout",
+            entity_type="user",
+            entity_id=str(user.id),
+            actor_type=AuditActorType.USER,
+            actor_user_id=user.id,
+        )
+    response.delete_cookie(settings.session_cookie_name, domain=settings.cookie_domain, path="/")
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/me", response_model=AuthSessionResult)
+async def auth_me(request: Request, db: Session = Depends(get_db)):
+    resolved = resolve_auth_session(db, _cookie_value(request))
+    if not resolved:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    auth_session, user = resolved
+    return build_auth_session_result(db, auth_session, user)
+
+
+@app.get("/api/workspaces", response_model=list[WorkspaceSummary])
+async def workspace_list(request: Request, db: Session = Depends(get_db)):
+    resolved = resolve_auth_session(db, _cookie_value(request))
+    if not resolved:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    auth_session, user = resolved
+    return build_auth_session_result(db, auth_session, user).workspaces
+
+
+@app.post("/api/workspaces/{workspace_id}/switch", response_model=WorkspaceSwitchResult)
+async def workspace_switch(
+    workspace_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    resolved = resolve_auth_session(db, _cookie_value(request))
+    if not resolved:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    auth_session, user = resolved
+    try:
+        result = switch_active_workspace(db, auth_session, user, workspace_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    return result
 
 
 @app.get("/api/login/status", response_model=LoginStatus)
-async def login_status():
-    """Check current login state."""
-    driver = await get_driver()
-    try:
-        result = await driver.check_login_status()
-        return LoginStatus(**result)
-    except Exception as e:
-        logger.exception("Login status check failed")
-        raise HTTPException(status_code=500, detail=str(e))
+async def login_status(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    driver = await _workspace_driver(context.active_workspace_id)
+    result = LoginStatus(**(await driver.check_login_status()))
+    update_workspace_login_status(db, context.active_workspace_id, result)
+    return result
+
+
+@app.post("/api/login/start", response_model=LoginStatus)
+async def login_start(
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    driver = await _workspace_driver(context.active_workspace_id)
+    result = LoginStatus(**(await driver.start_login()))
+    update_workspace_login_status(db, context.active_workspace_id, result)
+    record_audit_log(
+        db,
+        workspace_id=context.active_workspace_id,
+        action="workspace.login.start",
+        entity_type="workspace_session",
+        entity_id=str(context.active_workspace_id),
+        actor_type=AuditActorType.USER,
+        actor_user_id=context.user.id,
+    )
+    return result
 
 
 @app.post("/api/login/stop", response_model=LoginStatus)
-async def login_stop():
-    """Close the login browser."""
-    driver = await get_driver()
-    try:
-        result = await driver.stop_login()
-        return LoginStatus(**result)
-    except Exception as e:
-        logger.exception("Login stop failed")
-        raise HTTPException(status_code=500, detail=str(e))
+async def login_stop(
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    driver = await _workspace_driver(context.active_workspace_id)
+    result = LoginStatus(**(await driver.stop_login()))
+    update_workspace_login_status(db, context.active_workspace_id, result)
+    return result
 
 
-# ═════════════════════════════════════════════════════════════════
-#  CONTACTS
-# ═════════════════════════════════════════════════════════════════
+@app.get("/api/workspace-session", response_model=WorkspaceSessionResult)
+async def workspace_session_status(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    return get_workspace_session_result(db, context.active_workspace_id)
+
+
+@app.get("/api/settings", response_model=AppSettings)
+async def get_settings_route(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    return get_workspace_settings(db, context.active_workspace_id)
+
+
+@app.post("/api/settings", response_model=AppSettings)
+async def update_settings_route(
+    payload: AppSettings,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    updated = update_workspace_settings(db, context.active_workspace_id, payload)
+    record_audit_log(
+        db,
+        workspace_id=context.active_workspace_id,
+        action="workspace.settings.update",
+        entity_type="workspace_settings",
+        entity_id=str(context.active_workspace_id),
+        actor_type=AuditActorType.USER,
+        actor_user_id=context.user.id,
+        metadata={"proxy_enabled": updated.proxy_enabled},
+    )
+    return updated
+
 
 @app.get("/api/contacts", response_model=ContactListResult)
 async def get_contacts(
@@ -255,210 +311,181 @@ async def get_contacts(
     sort_by: str = "name",
     sort_order: str = "asc",
     selected_ids: str | None = None,
+    context: RequestContext = Depends(get_request_context),
+    db: Session = Depends(get_db),
 ):
-    """Return the latest persisted contact list and sync metadata."""
+    filters = {
+        "search": search,
+        "unread_only": unread_only,
+        "identity_source": identity_source,
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+        "selected_ids": [item.strip() for item in (selected_ids or "").split(",") if item.strip()],
+    }
+    return list_contacts(db, context.active_workspace_id, filters=ContactQueryParams(**filters))
+
+
+@app.post("/api/contacts/sync", response_model=JobSubmissionResult)
+async def sync_contacts(
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
     try:
-        filters = ContactQueryParams(
-            search=search,
-            unread_only=unread_only,
-            identity_source=identity_source,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            selected_ids=[item.strip() for item in (selected_ids or "").split(",") if item.strip()],
+        return create_job(
+            db,
+            workspace_id=context.active_workspace_id,
+            user_id=context.user.id,
+            job_type=JobType.CONTACT_SYNC,
+            payload={},
         )
-        return contact_store.get_contacts_result(filters)
-    except Exception as e:
-        logger.exception("Loading stored contacts failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/contacts/sync", response_model=ContactListResult)
-async def sync_contacts():
-    """Run a live Zalo sync and persist the result locally."""
-    driver = await get_driver()
-    try:
-        result = await driver.sync_contacts()
-        persisted = contact_store.persist_sync_result(result)
-        return ContactListResult(**persisted.model_dump())
-    except Exception as e:
-        logger.exception("Contact sync failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/api/contacts/sync-runs", response_model=ContactSyncRunListResult)
-async def get_contact_sync_runs():
-    """Return recent persisted contact sync runs."""
-    try:
-        runs = contact_store.list_sync_runs()
-        return ContactSyncRunListResult(runs=runs, total=len(runs))
-    except Exception as e:
-        logger.exception("Loading contact sync history failed")
-        raise HTTPException(status_code=500, detail=str(e))
+async def get_contact_sync_runs(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    return list_sync_runs(db, context.active_workspace_id)
 
 
 @app.post("/api/campaigns", response_model=CampaignOperationResult)
-async def create_campaign(payload: CampaignDraftPayload):
-    """Create a local campaign draft from stored contacts."""
+async def create_campaign_route(
+    payload: CampaignDraftPayload,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
     if not payload.name.strip():
         raise HTTPException(400, "Campaign name is required.")
     if not payload.message.strip():
         raise HTTPException(400, "Campaign message cannot be empty.")
     if not payload.filters.selected_ids:
         raise HTTPException(400, "Select at least one campaign recipient before saving.")
-    try:
-        campaign = contact_store.create_campaign(payload)
-        return CampaignOperationResult(
-            campaign=campaign,
-            message=f"Campaign '{campaign.name}' saved with {campaign.matched_count} matched contact(s).",
-        )
-    except Exception as e:
-        logger.exception("Campaign creation failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    return create_campaign(db, context.active_workspace_id, context.user.id, payload)
 
 
 @app.get("/api/campaigns", response_model=CampaignListResult)
-async def list_campaigns():
-    """Return recent saved campaigns."""
-    try:
-        campaigns = contact_store.list_campaigns()
-        return CampaignListResult(campaigns=campaigns, total=len(campaigns))
-    except Exception as e:
-        logger.exception("Campaign list failed")
-        raise HTTPException(status_code=500, detail=str(e))
+async def list_campaigns_route(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    return list_campaigns(db, context.active_workspace_id)
 
 
 @app.get("/api/campaigns/{campaign_id}/progress", response_model=CampaignProgressResult)
-async def get_campaign_progress(campaign_id: int):
-    """Return live progress for a running or recently completed campaign."""
-    return CampaignProgressResult(**_get_campaign_progress_snapshot(campaign_id))
+async def campaign_progress(campaign_id: int, context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    try:
+        return get_campaign_progress(db, context.active_workspace_id, campaign_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
 
 
-@app.post("/api/campaigns/{campaign_id}/execute", response_model=CampaignOperationResult)
-async def execute_campaign(campaign_id: int, payload: CampaignExecutePayload):
-    """Execute a saved campaign through the existing messaging driver."""
+@app.post("/api/campaigns/{campaign_id}/execute", response_model=JobSubmissionResult)
+async def execute_campaign(
+    campaign_id: int,
+    payload: CampaignExecutePayload,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
     if payload.delay_min < 0 or payload.delay_max < 0:
         raise HTTPException(400, "Delay values must be non-negative.")
     if payload.delay_max < payload.delay_min:
         raise HTTPException(400, "Max delay must be greater than or equal to min delay.")
-
-    driver = await get_driver()
     try:
-        prepared = contact_store.prepare_campaign_execution(campaign_id)
-        campaign = prepared["campaign"]
-        matched_contacts = prepared["matched_contacts"]
-        if not matched_contacts:
-            raise HTTPException(400, "Campaign has no matched contacts to execute.")
-        _reset_campaign_progress(campaign_id, len(matched_contacts))
-        send_result = await driver.send_campaign_messages(
-            contacts=matched_contacts,
-            message=campaign.message,
-            delay_min=payload.delay_min,
-            delay_max=payload.delay_max,
-            progress_callback=lambda event: _record_campaign_progress(campaign_id, event),
+        campaign = get_campaign(db, context.active_workspace_id, campaign_id)
+        submission = create_job(
+            db,
+            workspace_id=context.active_workspace_id,
+            user_id=context.user.id,
+            job_type=JobType.CAMPAIGN_SEND,
+            payload={"campaign_id": campaign_id, "delay_min": payload.delay_min, "delay_max": payload.delay_max},
         )
-        updated_campaign = contact_store.finalize_campaign_execution(
-            campaign_id=campaign_id,
-            matched_contacts=campaign.matched_contacts,
-            send_result=send_result,
-        )
-        return CampaignOperationResult(
-            campaign=updated_campaign,
-            message=f"Campaign '{updated_campaign.name}' executed: {updated_campaign.sent_count} sent, {updated_campaign.failed_count} failed.",
-        )
-    except HTTPException:
-        raise
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        logger.exception("Campaign execution failed")
-        _fail_campaign_progress(campaign_id, str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        campaign.last_job_id = submission.job_id
+        campaign.status = CampaignStatus.QUEUED
+        return submission
+    except ValueError as exc:
+        raise HTTPException(404 if "not found" in str(exc).lower() else 409, str(exc))
 
 
-# ═════════════════════════════════════════════════════════════════
-#  MESSAGING
-# ═════════════════════════════════════════════════════════════════
-
-@app.post("/api/message/send", response_model=MessageResult)
-async def send_messages(payload: MessagePayload):
-    """Send a message to a list of phone numbers or contact names."""
+@app.post("/api/message/send", response_model=JobSubmissionResult)
+async def send_messages(
+    payload: MessagePayload,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
     if not payload.targets:
         raise HTTPException(400, "No targets provided.")
     if not payload.message.strip():
         raise HTTPException(400, "Message cannot be empty.")
-
-    driver = await get_driver()
     try:
-        result = await driver.send_messages(
-            targets=payload.targets,
-            message=payload.message,
-            delay_min=payload.delay_min,
-            delay_max=payload.delay_max,
+        return create_job(
+            db,
+            workspace_id=context.active_workspace_id,
+            user_id=context.user.id,
+            job_type=JobType.MANUAL_SEND,
+            payload=payload.model_dump(),
         )
-        return MessageResult(**result)
-    except Exception as e:
-        logger.exception("Messaging failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 
-# ═════════════════════════════════════════════════════════════════
-#  FRIEND REQUESTS
-# ═════════════════════════════════════════════════════════════════
-
-@app.post("/api/friends/add", response_model=FriendRequestResult)
-async def add_friends(payload: FriendRequestPayload):
-    """Send friend requests to a list of phone numbers."""
+@app.post("/api/friends/add", response_model=JobSubmissionResult)
+async def add_friends(
+    payload: FriendRequestPayload,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
     if not payload.phone_numbers:
         raise HTTPException(400, "No phone numbers provided.")
-
-    driver = await get_driver()
     try:
-        result = await driver.send_friend_requests(
-            phone_numbers=payload.phone_numbers,
-            greeting_message=payload.greeting_message,
+        return create_job(
+            db,
+            workspace_id=context.active_workspace_id,
+            user_id=context.user.id,
+            job_type=JobType.FRIEND_REQUEST,
+            payload=payload.model_dump(),
         )
-        return FriendRequestResult(**result)
-    except Exception as e:
-        logger.exception("Friend requests failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 
-# ═════════════════════════════════════════════════════════════════
-#  GROUPS
-# ═════════════════════════════════════════════════════════════════
-
-@app.post("/api/groups/message", response_model=GroupResult)
-async def group_message(payload: GroupMessagePayload):
-    """Send a message in a Zalo group."""
+@app.post("/api/groups/message", response_model=JobSubmissionResult)
+async def group_message(
+    payload: GroupMessagePayload,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
     if not payload.group_name.strip():
         raise HTTPException(400, "Group name is required.")
     if not payload.message.strip():
         raise HTTPException(400, "Message cannot be empty.")
-
-    driver = await get_driver()
     try:
-        result = await driver.send_group_message(
-            group_name=payload.group_name,
-            message=payload.message,
+        return create_job(
+            db,
+            workspace_id=context.active_workspace_id,
+            user_id=context.user.id,
+            job_type=JobType.GROUP_SEND,
+            payload=payload.model_dump(),
         )
-        return GroupResult(**result)
-    except Exception as e:
-        logger.exception("Group message failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 
-# ═════════════════════════════════════════════════════════════════
-#  SETTINGS
-# ═════════════════════════════════════════════════════════════════
-
-@app.get("/api/settings", response_model=AppSettings)
-async def get_settings():
-    return _settings
+@app.get("/api/jobs", response_model=JobListResult)
+async def jobs_list(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    return list_jobs(db, context.active_workspace_id)
 
 
-@app.post("/api/settings", response_model=AppSettings)
-async def update_settings(payload: AppSettings):
-    global _settings
-    _settings = payload
-    _save_settings()
-    return _settings
+@app.get("/api/jobs/{job_id}", response_model=JobResult)
+async def job_detail(job_id: UUID, context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
+    try:
+        return get_job(db, context.active_workspace_id, job_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.post("/api/jobs/{job_id}/cancel", response_model=CancelJobResult)
+async def cancel_job_route(
+    job_id: UUID,
+    context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    try:
+        return cancel_job(db, context.active_workspace_id, job_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
