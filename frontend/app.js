@@ -19,6 +19,7 @@
     loaded: false,
     loading: false,
     error: "",
+    mode: "manual",
   };
   const campaignSelectionState = {
     selectedContacts: [],
@@ -188,6 +189,13 @@
     return true;
   }
 
+  function contactIsSelectedForPicker(contact) {
+    if (manualPickerState.mode === "campaign") {
+      return campaignSelectionState.selectedContacts.some((selected) => selected.identity_key === contact.identity_key);
+    }
+    return getManualTargetLookup().has(normalizeSearchText(contact.name));
+  }
+
   function setContactPickerStatus(message, type = "neutral") {
     const el = $("#contact-picker-status");
     el.textContent = message;
@@ -203,7 +211,6 @@
 
   function renderManualPickerList() {
     const list = $("#contact-picker-list");
-    const lookup = getManualTargetLookup();
 
     if (manualPickerState.loading) {
       list.innerHTML = '<div class="picker-empty">Loading stored contacts...</div>';
@@ -226,7 +233,7 @@
     }
 
     list.innerHTML = manualPickerState.filtered.map((contact) => {
-      const isAdded = lookup.has(normalizeSearchText(contact.name));
+      const isAdded = contactIsSelectedForPicker(contact);
       const subtitleParts = [
         contact.identity_source || "unknown",
         contact.last_seen_at ? formatTimestamp(contact.last_seen_at) : "No last seen timestamp",
@@ -247,7 +254,7 @@
           <div class="picker-contact__actions">
             <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : ""}">${contact.unread ? "Unread" : "Seen"}</span>
             <span class="picker-contact__state ${isAdded ? "picker-contact__state--added" : ""}">${isAdded ? "Added" : "Ready"}</span>
-            <button class="btn btn--secondary btn--sm" type="button" data-contact-name="${esc(contact.name)}">${isAdded ? "Added" : "Add"}</button>
+            <button class="btn btn--secondary btn--sm" type="button" data-contact-identity="${esc(contact.identity_key || "")}" data-contact-name="${esc(contact.name)}">${isAdded ? "Added" : "Add"}</button>
           </div>
         </div>
       `;
@@ -270,7 +277,7 @@
       manualPickerState.loaded = true;
       filterManualPickerContacts();
       if (manualPickerState.contacts.length) {
-        setContactPickerStatus(`Loaded ${manualPickerState.contacts.length} stored contact(s). Select names to add them into the manual target list.`, "success");
+        setContactPickerStatus(`Loaded ${manualPickerState.contacts.length} stored contact(s). Select contacts to add them into ${manualPickerState.mode === "campaign" ? "campaign recipients" : "the manual target list"}.`, "success");
       } else {
         setContactPickerStatus("No stored contacts yet. Sync contacts first in the Contacts tab.", "empty");
       }
@@ -284,7 +291,12 @@
     }
   }
 
-  async function openManualPicker() {
+  async function openManualPicker(mode = "manual") {
+    manualPickerState.mode = mode;
+    $("#contact-picker-title").textContent = mode === "campaign" ? "Choose Campaign Contacts" : "Choose Contacts";
+    $(".picker-modal__sub").textContent = mode === "campaign"
+      ? "Search your stored contacts and add them into the selected campaign recipients."
+      : "Search your stored contacts and add names into the manual target list.";
     const modal = $("#contact-picker-modal");
     modal.style.display = "flex";
     modal.setAttribute("aria-hidden", "false");
@@ -717,7 +729,11 @@
 
   function bindMessaging() {
     $("#btn-open-contact-picker").addEventListener("click", () => {
-      openManualPicker();
+      openManualPicker("manual");
+    });
+
+    $("#btn-campaign-open-contact-picker").addEventListener("click", () => {
+      openManualPicker("campaign");
     });
 
     $("#btn-clear-msg-targets").addEventListener("click", () => {
@@ -746,6 +762,18 @@
       if (!btn) return;
       const name = btn.dataset.contactName || "";
       if (!name) return;
+      if (manualPickerState.mode === "campaign") {
+        const identityKey = btn.dataset.contactIdentity || "";
+        const contact = manualPickerState.contacts.find((item) => item.identity_key === identityKey);
+        if (!contact) return;
+        const added = addCampaignContacts([contact]);
+        renderManualPickerList();
+        log(
+          added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`,
+          added ? "success" : ""
+        );
+        return;
+      }
       const added = appendManualTarget(name);
       renderManualPickerList();
       log(

@@ -3,3 +3,8 @@ uvicorn[standard]==0.34.2
 playwright==1.52.0
 pydantic==2.11.1
 python-multipart==0.0.20
+sqlalchemy==2.0.41
+alembic==1.16.1
+psycopg[binary]==3.2.9
+pydantic-settings==2.9.1
+cryptography==45.0.3

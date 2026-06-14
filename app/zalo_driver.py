@@ -16,17 +16,18 @@ Full feature set:
 
 import asyncio
 import functools
-import json
 import logging
 import os
 import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
+from app.config import get_settings
 from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
 from app.models import (
     AppSettings,
@@ -42,11 +43,7 @@ from app.proxy_config import parse_proxy_settings
 logger = logging.getLogger("zalo_driver")
 
 ZALO_CHAT_URL = "https://chat.zalo.me/"
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-USER_DATA_DIR = os.path.join(BASE_DIR, "user_data")
-AUTH_STATE_DIR = os.path.join(BASE_DIR, "auth_state")
-SYNC_DEBUG_DIR = os.path.join(BASE_DIR, "debug_sync")
-SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
+APP_SETTINGS = get_settings()
 SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SEND_DEBUG_ENABLED = (
     os.getenv("ZALO_SEND_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -142,7 +139,11 @@ class ZaloDriver:
     All Playwright calls use sync_api in a dedicated thread.
     """
 
-    def __init__(self):
+    def __init__(self, workspace_key: str, profile_path: str, settings_provider: Callable[[], AppSettings]):
+        self.workspace_key = workspace_key
+        self.profile_path = Path(profile_path)
+        self._settings_provider = settings_provider
+        self._debug_dir = APP_SETTINGS.sync_debug_root / workspace_key
         self._pw: Optional[Playwright] = None
         self._login_context: Optional[BrowserContext] = None
         self._login_page: Optional[Page] = None
@@ -167,11 +168,8 @@ class ZaloDriver:
             logger.info("Playwright started (sync_api, threaded).")
 
     def _load_runtime_settings(self) -> AppSettings:
-        if not os.path.exists(SETTINGS_PATH):
-            return AppSettings()
         try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as settings_file:
-                return AppSettings(**json.load(settings_file))
+            return self._settings_provider()
         except Exception as exc:
             logger.warning(f"Failed to load settings for browser launch: {exc}")
             return AppSettings()
@@ -232,14 +230,14 @@ class ZaloDriver:
         self._ensure_pw()
         self._close_login_sync()
 
-        os.makedirs(USER_DATA_DIR, exist_ok=True)
+        self.profile_path.mkdir(parents=True, exist_ok=True)
         proxy = self._get_launch_proxy_config()
         if proxy:
             logger.info(f"Launching login browser with proxy {proxy.get('server')}")
 
         try:
             self._login_context = self._pw.chromium.launch_persistent_context(
-                user_data_dir=USER_DATA_DIR,
+                user_data_dir=str(self.profile_path),
                 channel="chrome",
                 headless=False,
                 args=[
@@ -333,13 +331,13 @@ class ZaloDriver:
     def _get_worker_context(self) -> BrowserContext:
         self._ensure_pw()
 
-        if os.path.exists(USER_DATA_DIR):
+        if self.profile_path.exists():
             proxy = self._get_launch_proxy_config()
             if proxy:
                 logger.info(f"Launching worker browser with proxy {proxy.get('server')}")
             try:
                 return self._pw.chromium.launch_persistent_context(
-                    user_data_dir=USER_DATA_DIR,
+                    user_data_dir=str(self.profile_path),
                     channel="chrome",
                     headless=False,
                     args=[
@@ -715,11 +713,11 @@ class ZaloDriver:
         if not SYNC_DEBUG_ENABLED:
             return []
 
-        os.makedirs(SYNC_DEBUG_DIR, exist_ok=True)
+        self._debug_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", label).strip("-") or "sync"
-        screenshot_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.png")
-        html_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.html")
+        screenshot_path = str(self._debug_dir / f"{stamp}-{safe_label}.png")
+        html_path = str(self._debug_dir / f"{stamp}-{safe_label}.html")
         artifacts = []
 
         try:
@@ -741,11 +739,11 @@ class ZaloDriver:
         if not SEND_DEBUG_ENABLED:
             return []
 
-        os.makedirs(SYNC_DEBUG_DIR, exist_ok=True)
+        self._debug_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", label).strip("-") or "send"
-        screenshot_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.png")
-        html_path = os.path.join(SYNC_DEBUG_DIR, f"{stamp}-{safe_label}.html")
+        screenshot_path = str(self._debug_dir / f"{stamp}-{safe_label}.png")
+        html_path = str(self._debug_dir / f"{stamp}-{safe_label}.html")
         artifacts = []
 
         try:
@@ -2091,11 +2089,19 @@ class ZaloDriver:
 #  SINGLETON
 # ═══════════════════════════════════════════════════════════════
 
-_driver: Optional[ZaloDriver] = None
+_drivers: dict[str, ZaloDriver] = {}
 
 
-async def get_driver() -> ZaloDriver:
-    global _driver
-    if _driver is None:
-        _driver = ZaloDriver()
-    return _driver
+async def get_driver(workspace_key: str, profile_path: str, settings_provider: Callable[[], AppSettings]) -> ZaloDriver:
+    driver = _drivers.get(workspace_key)
+    if driver is None:
+        driver = ZaloDriver(workspace_key=workspace_key, profile_path=profile_path, settings_provider=settings_provider)
+        _drivers[workspace_key] = driver
+    return driver
+
+
+async def shutdown_all_drivers() -> None:
+    drivers = list(_drivers.values())
+    for driver in drivers:
+        await driver.shutdown()
+    _drivers.clear()
