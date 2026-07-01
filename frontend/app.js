@@ -1,6 +1,7 @@
 /**
  * MMBZalo - Dashboard Client Logic
- * Handles: Login flow, Messaging, Friend Requests, Groups, Contacts, Campaigns, Settings
+ * Handles dashboard auth, workspace switching, Zalo session control,
+ * settings, contacts, campaigns, and async job polling.
  */
 
 (() => {
@@ -8,145 +9,55 @@
 
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
-  let loginPollInterval = null;
-  let campaignProgressPollInterval = null;
-  let campaignProgressSeen = new Set();
-  let lastCampaignPreview = null;
-  let campaignHistoryCache = [];
-  const manualPickerState = {
-    contacts: [],
-    filtered: [],
-    loaded: false,
-    loading: false,
-    error: "",
-    mode: "manual",
-  };
-  const campaignSelectionState = {
-    selectedContacts: [],
-    previewContacts: [],
+  const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+
+  const state = {
+    auth: {
+      ready: false,
+      authenticated: false,
+      user: null,
+      workspaces: [],
+      activeWorkspaceId: null,
+    },
+    loginPollInterval: null,
+    campaignProgressPollInterval: null,
+    campaignProgressSeen: new Set(),
+    jobPollers: new Map(),
+    lastRenderedLoginState: null,
+    lastCampaignPreview: null,
+    campaignHistoryCache: [],
+    manualPickerState: {
+      contacts: [],
+      filtered: [],
+      loaded: false,
+      loading: false,
+      error: "",
+      mode: "manual",
+    },
+    campaignSelectionState: {
+      selectedContacts: [],
+      previewContacts: [],
+    },
   };
 
-  async function checkHealth() {
-    try {
-      const res = await fetch("/api/health");
-      if (res.ok) {
-        $("#health-badge .status-dot").className = "status-dot status-dot--ok";
-        $("#health-badge span:last-child").textContent = "API Online";
-      }
-    } catch {
-      $("#health-badge .status-dot").className = "status-dot status-dot--err";
-      $("#health-badge span:last-child").textContent = "API Offline";
-    }
+  function esc(str) {
+    const d = document.createElement("div");
+    d.textContent = str ?? "";
+    return d.innerHTML;
   }
 
-  function log(msg, type = "") {
+  function log(message, type = "") {
     const logEl = $("#activity-log");
     const empty = logEl.querySelector(".log-empty");
     if (empty) empty.remove();
     const now = new Date().toLocaleTimeString("en-GB", { hour12: false });
     const entry = document.createElement("div");
     entry.className = "log-entry";
-    entry.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${type ? "log-msg--" + type : ""}">${esc(msg)}</span>`;
+    entry.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${type ? `log-msg--${type}` : ""}">${esc(message)}</span>`;
     logEl.prepend(entry);
-    while (logEl.children.length > 50) logEl.lastChild.remove();
-  }
-
-  function resetCampaignProgressUI(total = 0) {
-    campaignProgressSeen = new Set();
-    $("#campaign-progress").style.display = "block";
-    $("#campaign-progress-count").textContent = total ? `0/${total} sent` : "Starting";
-    $("#campaign-progress-list").innerHTML = '<div class="campaign-progress__item">Preparing campaign...</div>';
-  }
-
-  function appendCampaignProgressEvent(event) {
-    if (!event || campaignProgressSeen.has(event.sequence)) return;
-    campaignProgressSeen.add(event.sequence);
-    const list = $("#campaign-progress-list");
-    const preparing = list.querySelector(".campaign-progress__item");
-    if (preparing && preparing.textContent === "Preparing campaign...") preparing.remove();
-    const item = document.createElement("div");
-    item.className = `campaign-progress__item ${event.success === true ? "campaign-progress__item--success" : ""} ${event.success === false ? "campaign-progress__item--error" : ""}`;
-    const route = event.route ? `<span class="campaign-progress__route">${esc(event.route.replace("_", " "))}</span>` : "";
-    item.innerHTML = `<span>${esc(event.message || "")}</span>${route}`;
-    list.prepend(item);
-    while (list.children.length > 30) list.lastChild.remove();
-    if (event.message) log(event.message, event.level === "error" || event.success === false ? "error" : event.success === true ? "success" : "");
-  }
-
-  async function pollCampaignProgress(campaignId) {
-    const res = await fetch(`/api/campaigns/${campaignId}/progress`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed to load campaign progress.");
-    $("#campaign-progress").style.display = "block";
-    $("#campaign-progress-count").textContent = data.total ? `${data.sent}/${data.total} sent` : data.status;
-    (data.events || []).forEach(appendCampaignProgressEvent);
-    if (data.status === "completed" || data.status === "failed") {
-      stopCampaignProgressPolling();
+    while (logEl.children.length > 50) {
+      logEl.lastChild.remove();
     }
-    return data;
-  }
-
-  function startCampaignProgressPolling(campaignId, total = 0) {
-    stopCampaignProgressPolling();
-    resetCampaignProgressUI(total);
-    pollCampaignProgress(campaignId).catch(() => {});
-    campaignProgressPollInterval = setInterval(() => {
-      pollCampaignProgress(campaignId).catch((err) => {
-        log(`Campaign progress error: ${err.message}`, "error");
-        stopCampaignProgressPolling();
-      });
-    }, 1000);
-  }
-
-  function stopCampaignProgressPolling() {
-    if (campaignProgressPollInterval) {
-      clearInterval(campaignProgressPollInterval);
-      campaignProgressPollInterval = null;
-    }
-  }
-
-  function setContactsStatus(state, message) {
-    const el = $("#contacts-status");
-    el.className = `contacts-status contacts-status--${state}`;
-    el.textContent = message;
-  }
-
-  function getToggle(groupId) {
-    const active = $(`#${groupId} .toggle-btn--active`);
-    return active ? active.dataset.value : "";
-  }
-
-  function setToggle(groupId, value) {
-    const group = $(`#${groupId}`);
-    if (!group) return;
-    group.querySelectorAll(".toggle-btn").forEach((btn) => {
-      btn.classList.toggle("toggle-btn--active", btn.dataset.value === value);
-    });
-  }
-
-  function formatLegacyProxyValue(settings) {
-    if (settings.proxy_raw) return settings.proxy_raw;
-    if (settings.proxy_address && settings.proxy_port) {
-      return `${settings.proxy_address}:${settings.proxy_port}`;
-    }
-    return "";
-  }
-
-  async function readErrorMessage(res, fallback) {
-    try {
-      const data = await res.json();
-      if (typeof data.detail === "string" && data.detail) return data.detail;
-      if (Array.isArray(data.detail) && data.detail.length) {
-        return data.detail.map((item) => item.msg || fallback).join("; ");
-      }
-    } catch {}
-    return fallback;
-  }
-
-  function esc(str) {
-    const d = document.createElement("div");
-    d.textContent = str ?? "";
-    return d.innerHTML;
   }
 
   function formatTimestamp(value) {
@@ -165,6 +76,678 @@
 
   function normalizeSearchText(value) {
     return (value || "").trim().toLocaleLowerCase();
+  }
+
+  function formatLegacyProxyValue(settings) {
+    if (settings.proxy_raw) return settings.proxy_raw;
+    if (settings.proxy_address && settings.proxy_port) {
+      return `${settings.proxy_address}:${settings.proxy_port}`;
+    }
+    return "";
+  }
+
+  function setAuthMessage(message, stateName = "neutral") {
+    const el = $("#auth-message");
+    el.textContent = message;
+    if (stateName === "neutral") {
+      el.removeAttribute("data-state");
+    } else {
+      el.dataset.state = stateName;
+    }
+  }
+
+  function getActiveWorkspace() {
+    return state.auth.workspaces.find((workspace) => workspace.workspace_id === state.auth.activeWorkspaceId) || null;
+  }
+
+  function stopAllJobWatchers() {
+    for (const timer of state.jobPollers.values()) {
+      clearInterval(timer);
+    }
+    state.jobPollers.clear();
+  }
+
+  function stopCampaignProgressPolling() {
+    if (state.campaignProgressPollInterval) {
+      clearInterval(state.campaignProgressPollInterval);
+      state.campaignProgressPollInterval = null;
+    }
+  }
+
+  function stopLoginPolling() {
+    if (state.loginPollInterval) {
+      clearInterval(state.loginPollInterval);
+      state.loginPollInterval = null;
+    }
+  }
+
+  function clearRuntimePollers() {
+    stopAllJobWatchers();
+    stopCampaignProgressPolling();
+    stopLoginPolling();
+  }
+
+  function getToggle(groupId) {
+    const active = $(`#${groupId} .toggle-btn--active`);
+    return active ? active.dataset.value : "";
+  }
+
+  function setToggle(groupId, value) {
+    const group = $(`#${groupId}`);
+    if (!group) return;
+    group.querySelectorAll(".toggle-btn").forEach((btn) => {
+      btn.classList.toggle("toggle-btn--active", btn.dataset.value === value);
+    });
+  }
+
+  function showTaskResult(elId, data, kind) {
+    const el = $(`#${elId}`);
+    el.style.display = "block";
+    const isSuccess = (data.failed || 0) === 0;
+    el.className = `task-result ${isSuccess ? "task-result--success" : "task-result--info"}`;
+    const icon = isSuccess ? "OK" : "WARN";
+    const list = data.results || [];
+    const items = list.length > 0
+      ? `<ul class="task-result__items">${
+          list.map((row) => {
+            const label = kind === "friend" ? row.phone : row.target;
+            return row.success
+              ? `<li class="success">OK ${esc(label)}</li>`
+              : `<li class="fail">ERR ${esc(label)} - ${esc(row.error || "Unknown error")}</li>`;
+          }).join("")
+        }</ul>`
+      : "";
+    el.innerHTML = `
+      <div class="task-result__title">${icon} ${esc(data.message || "Completed.")}</div>
+      <div class="task-result__detail">Total: ${data.total || 0} | Sent: ${data.sent || 0} | Failed: ${data.failed || 0}</div>
+      ${items}`;
+  }
+
+  function showTaskResultError(elId, message) {
+    const el = $(`#${elId}`);
+    el.style.display = "block";
+    el.className = "task-result task-result--fail";
+    el.innerHTML = `<div class="task-result__title">ERR Error</div><div class="task-result__detail">${esc(message)}</div>`;
+  }
+
+  function showTaskResultInfo(elId, title, message, items = []) {
+    const el = $(`#${elId}`);
+    el.style.display = "block";
+    el.className = "task-result task-result--info";
+    const list = items.length
+      ? `<ul class="task-result__items">${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+      : "";
+    el.innerHTML = `<div class="task-result__title">${esc(title)}</div><div class="task-result__detail">${esc(message)}</div>${list}`;
+  }
+
+  function setContactsStatus(stateName, message) {
+    const el = $("#contacts-status");
+    el.className = `contacts-status contacts-status--${stateName}`;
+    el.textContent = message;
+  }
+
+  function updateContactsMeta(data) {
+    $("#contacts-meta-count").textContent = String(data.stored_contact_count || 0);
+    $("#contacts-meta-status").textContent = data.last_sync_status || "Never synced";
+    $("#contacts-meta-time").textContent = data.last_sync_at ? formatTimestamp(data.last_sync_at) : "No stored sync yet";
+  }
+
+  function renderContacts(data) {
+    $("#contacts-block").style.display = "block";
+    $("#contacts-count-badge").textContent = `${data.stored_contact_count || data.contact_count || 0} stored`;
+    $("#contacts-tbody").innerHTML = (data.contacts || []).map((contact, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${contact.avatar_url ? `<img src="${esc(contact.avatar_url)}" class="contact-avatar" alt="" />` : "-"}</td>
+        <td class="contact-name">${esc(contact.name)}</td>
+        <td>${contact.last_message ? esc(contact.last_message) : "-"}</td>
+        <td>${contact.unread ? '<span class="unread-dot"></span>' : "-"}</td>
+      </tr>
+    `).join("");
+  }
+
+  function clearContactsDisplay(message) {
+    $("#contacts-block").style.display = "none";
+    updateContactsMeta({ stored_contact_count: 0, last_sync_status: "Never synced", last_sync_at: null });
+    setContactsStatus("empty", message);
+    $("#contacts-result").style.display = "none";
+  }
+
+  function resetCampaignProgressUI(total = 0) {
+    state.campaignProgressSeen = new Set();
+    $("#campaign-progress").style.display = "block";
+    $("#campaign-progress-count").textContent = total ? `0/${total} sent` : "Starting";
+    $("#campaign-progress-list").innerHTML = '<div class="campaign-progress__item">Preparing campaign...</div>';
+  }
+
+  function appendCampaignProgressEvent(event) {
+    if (!event || state.campaignProgressSeen.has(event.sequence)) return;
+    state.campaignProgressSeen.add(event.sequence);
+    const list = $("#campaign-progress-list");
+    const placeholder = list.querySelector(".campaign-progress__item");
+    if (placeholder && placeholder.textContent === "Preparing campaign...") {
+      placeholder.remove();
+    }
+    const item = document.createElement("div");
+    item.className = `campaign-progress__item ${event.success === true ? "campaign-progress__item--success" : ""} ${event.success === false ? "campaign-progress__item--error" : ""}`;
+    const route = event.route ? `<span class="campaign-progress__route">${esc(event.route.replaceAll("_", " "))}</span>` : "";
+    item.innerHTML = `<span>${esc(event.message || "")}</span>${route}`;
+    list.prepend(item);
+    while (list.children.length > 30) {
+      list.lastChild.remove();
+    }
+  }
+
+  function buildContactsQuery(filters) {
+    const params = new URLSearchParams();
+    if (filters.search) params.set("search", filters.search);
+    if (filters.unread_only) params.set("unread_only", "true");
+    if (filters.identity_source && filters.identity_source !== "all") params.set("identity_source", filters.identity_source);
+    if (filters.sort_by) params.set("sort_by", filters.sort_by);
+    if (filters.sort_order) params.set("sort_order", filters.sort_order);
+    if (filters.selected_ids && filters.selected_ids.length) params.set("selected_ids", filters.selected_ids.join(","));
+    return params.toString();
+  }
+
+  async function parseJsonResponse(res) {
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      const text = await res.text();
+      return text ? { detail: text } : null;
+    }
+    return res.json();
+  }
+
+  function handleSignedOut(message = "Sign in to unlock workspace data and automation actions.", silent = false) {
+    clearRuntimePollers();
+    state.auth.ready = true;
+    state.auth.authenticated = false;
+    state.auth.user = null;
+    state.auth.workspaces = [];
+    state.auth.activeWorkspaceId = null;
+    state.lastRenderedLoginState = null;
+    $("#workspace-select").innerHTML = "";
+    $("#dashboard-session").style.display = "none";
+    $("#header-workspace").style.display = "none";
+    $("#btn-auth-logout").style.display = "none";
+    $("#dashboard-session-user").textContent = "";
+    $("#dashboard-session-meta").textContent = "";
+    $("#auth-form-panel").style.display = "block";
+    $("#auth-summary-panel").style.display = "none";
+    setAuthMessage(message, silent ? "neutral" : "error");
+    $("#login-info").style.display = "none";
+    $("#login-name").textContent = "";
+    $("#btn-login-start").disabled = true;
+    $("#btn-login-stop").disabled = true;
+    $$(".nav-item").forEach((btn) => {
+      const unlocked = btn.dataset.module === "login";
+      btn.disabled = !unlocked;
+      btn.classList.toggle("nav-item--active", unlocked);
+    });
+    $$(".module").forEach((module) => {
+      module.style.display = module.id === "mod-login" ? "block" : "none";
+    });
+    clearContactsDisplay("Sign in to load contacts for the active workspace.");
+    $("#campaign-history-list").innerHTML = '<p class="field-hint">Sign in to load campaign history.</p>';
+    $("#campaign-preview").style.display = "none";
+    $("#campaign-progress").style.display = "none";
+    if (!silent) {
+      log(message, "error");
+    }
+  }
+
+  function applyAuthSession(data, messageState = "success") {
+    state.auth.ready = true;
+    state.auth.authenticated = true;
+    state.auth.user = data.user;
+    state.auth.workspaces = data.workspaces || [];
+    state.auth.activeWorkspaceId = data.active_workspace_id || (state.auth.workspaces[0] ? state.auth.workspaces[0].workspace_id : null);
+
+    $("#auth-form-panel").style.display = "none";
+    $("#auth-summary-panel").style.display = "block";
+    $("#btn-auth-logout").style.display = "inline-flex";
+    $("#dashboard-session").style.display = "flex";
+    $("#header-workspace").style.display = "flex";
+    $("#dashboard-session-user").textContent = data.user.display_name || data.user.email;
+
+    const workspaceSelect = $("#workspace-select");
+    workspaceSelect.innerHTML = "";
+    (state.auth.workspaces || []).forEach((workspace) => {
+      const option = document.createElement("option");
+      option.value = workspace.workspace_id;
+      option.textContent = `${workspace.name} (${workspace.role})`;
+      option.selected = workspace.workspace_id === state.auth.activeWorkspaceId;
+      workspaceSelect.appendChild(option);
+    });
+
+    const activeWorkspace = getActiveWorkspace();
+    $("#dashboard-session-meta").textContent = activeWorkspace ? activeWorkspace.name : "No workspace selected";
+    $("#auth-summary-user").textContent = `${data.user.display_name} (${data.user.email})`;
+    $("#auth-summary-workspace").textContent = activeWorkspace ? activeWorkspace.name : "-";
+    $("#auth-summary-role").textContent = activeWorkspace ? activeWorkspace.role : "-";
+    setAuthMessage(`Signed in as ${data.user.email}.`, messageState);
+
+    $$(".nav-item").forEach((btn) => {
+      btn.disabled = false;
+    });
+  }
+
+  async function apiRequest(path, options = {}) {
+    const { allowUnauthorized = false, body, headers = {}, ...rest } = options;
+    const init = {
+      credentials: "same-origin",
+      ...rest,
+      headers: { ...headers },
+    };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    const res = await fetch(path, init);
+    const data = await parseJsonResponse(res);
+    if (res.status === 401 && allowUnauthorized) {
+      return null;
+    }
+    if (!res.ok) {
+      const message = (data && typeof data.detail === "string" && data.detail) || "Request failed.";
+      if (res.status === 401) {
+        handleSignedOut("Your session expired. Sign in again.");
+      }
+      const error = new Error(message);
+      error.status = res.status;
+      error.payload = data;
+      throw error;
+    }
+    return data;
+  }
+
+  async function checkHealth() {
+    try {
+      const health = await apiRequest("/api/health", { allowUnauthorized: true });
+      let label = "API Online";
+      let dotClass = "status-dot status-dot--ok";
+      try {
+        const readiness = await apiRequest("/api/readiness", { allowUnauthorized: true });
+        if (readiness && readiness.worker && readiness.worker !== "ok") {
+          label = `API Ready / Worker ${readiness.worker}`;
+          dotClass = "status-dot";
+        } else {
+          label = "API Ready";
+        }
+      } catch {
+        label = health?.status === "ok" ? "API Online" : "Checking...";
+      }
+      $("#health-badge .status-dot").className = dotClass;
+      $("#health-badge span:last-child").textContent = label;
+    } catch {
+      $("#health-badge .status-dot").className = "status-dot status-dot--err";
+      $("#health-badge span:last-child").textContent = "API Offline";
+    }
+  }
+
+  async function bootstrapSession() {
+    const session = await apiRequest("/api/auth/me", { allowUnauthorized: true });
+    if (!session) {
+      handleSignedOut("Sign in to unlock workspace data and automation actions.", true);
+      return;
+    }
+    applyAuthSession(session, "success");
+    await hydrateWorkspace();
+  }
+
+  async function hydrateWorkspace() {
+    if (!state.auth.authenticated) return;
+    const activeWorkspace = getActiveWorkspace();
+    $("#dashboard-session-meta").textContent = activeWorkspace ? activeWorkspace.name : "No workspace selected";
+    $("#auth-summary-workspace").textContent = activeWorkspace ? activeWorkspace.name : "-";
+    $("#auth-summary-role").textContent = activeWorkspace ? activeWorkspace.role : "-";
+    clearRuntimePollers();
+    renderCampaignSelection();
+    setMessageMode("manual");
+    await Promise.allSettled([
+      loadSettings(),
+      loadStoredContacts(),
+      loadCampaignHistory(),
+      refreshLoginStatus(),
+    ]);
+  }
+
+  async function refreshLoginStatus() {
+    if (!state.auth.authenticated) {
+      $("#btn-login-start").disabled = true;
+      $("#btn-login-stop").disabled = true;
+      return;
+    }
+    try {
+      const data = await apiRequest("/api/login/status");
+      renderZaloLoginState(data);
+    } catch (err) {
+      renderZaloLoginState({
+        state: "error",
+        message: err.message,
+      });
+    }
+  }
+
+  function renderZaloLoginState(data) {
+    const icon = $("#login-state-icon");
+    const text = $("#login-state-text");
+    const detail = $("#login-state-detail");
+    const btnStart = $("#btn-login-start");
+    const btnStop = $("#btn-login-stop");
+
+    if (!state.auth.authenticated) {
+      text.textContent = "Dashboard sign-in required";
+      detail.textContent = "Sign in first, then manage the workspace browser session.";
+      icon.className = "login-state";
+      btnStart.disabled = true;
+      btnStop.disabled = true;
+      $("#login-info").style.display = "none";
+      return;
+    }
+
+    const loginInfo = $("#login-info");
+    const loginName = $("#login-name");
+    if (data.profile_name) {
+      loginInfo.style.display = "flex";
+      loginName.textContent = data.profile_name;
+    } else {
+      loginInfo.style.display = "none";
+      loginName.textContent = "";
+    }
+
+    if (data.state === "authenticated") {
+      text.textContent = "Authenticated";
+      detail.textContent = data.message || "Workspace session is ready.";
+      icon.className = "login-state login-state--ok";
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      if (state.lastRenderedLoginState !== "authenticated") {
+        log(`Workspace Zalo session ready${data.profile_name ? ` for ${data.profile_name}` : ""}.`, "success");
+      }
+      state.lastRenderedLoginState = "authenticated";
+      return;
+    }
+
+    if (data.state === "waiting_qr") {
+      text.textContent = "Waiting for login";
+      detail.textContent = data.message || "Scan the QR code or complete the login in the browser window.";
+      icon.className = "login-state login-state--waiting";
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      state.lastRenderedLoginState = "waiting_qr";
+      return;
+    }
+
+    if (data.state === "expired") {
+      text.textContent = "Session Expired";
+      detail.textContent = data.message || "Re-authentication is required.";
+      icon.className = "login-state login-state--err";
+      btnStart.disabled = false;
+      btnStop.disabled = false;
+      state.lastRenderedLoginState = "expired";
+      return;
+    }
+
+    if (data.state === "error") {
+      text.textContent = "Session Error";
+      detail.textContent = data.message || "Workspace session check failed.";
+      icon.className = "login-state login-state--err";
+      btnStart.disabled = false;
+      btnStop.disabled = false;
+      state.lastRenderedLoginState = "error";
+      return;
+    }
+
+    text.textContent = "Not connected";
+    detail.textContent = data.message || 'Click "Start Login" to begin.';
+    icon.className = "login-state";
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    state.lastRenderedLoginState = "idle";
+  }
+
+  function startLoginPolling() {
+    stopLoginPolling();
+    state.loginPollInterval = setInterval(async () => {
+      try {
+        const data = await apiRequest("/api/login/status");
+        renderZaloLoginState(data);
+        if (data.state === "authenticated" || data.state === "idle" || data.state === "error" || data.state === "expired") {
+          stopLoginPolling();
+        }
+      } catch (err) {
+        stopLoginPolling();
+        log(`Login status error: ${err.message}`, "error");
+      }
+    }, 2500);
+  }
+
+  function latestJobMessage(job) {
+    const events = job.events || [];
+    const lastEvent = events.length ? events[events.length - 1] : null;
+    return (lastEvent && lastEvent.message) || (job.result && job.result.message) || `${job.type} ${job.status}`;
+  }
+
+  function extractJobError(job) {
+    const message = latestJobMessage(job);
+    if (job.result && typeof job.result.message === "string" && job.result.message) {
+      return job.result.message;
+    }
+    return message;
+  }
+
+  async function pollJob(jobId, handlers = {}) {
+    const key = String(jobId);
+    const runTick = async () => {
+      const job = await apiRequest(`/api/jobs/${jobId}`);
+      if (handlers.onUpdate) {
+        handlers.onUpdate(job);
+      }
+      if (TERMINAL_JOB_STATUSES.has(job.status)) {
+        const timer = state.jobPollers.get(key);
+        if (timer) {
+          clearInterval(timer);
+          state.jobPollers.delete(key);
+        }
+        if (handlers.onComplete) {
+          handlers.onComplete(job);
+        }
+      }
+      return job;
+    };
+
+    const wrappedTick = () => {
+      runTick().catch((err) => {
+        const timer = state.jobPollers.get(key);
+        if (timer) {
+          clearInterval(timer);
+          state.jobPollers.delete(key);
+        }
+        if (handlers.onError) {
+          handlers.onError(err);
+        } else {
+          log(`Job poll error: ${err.message}`, "error");
+        }
+      });
+    };
+
+    if (state.jobPollers.has(key)) {
+      clearInterval(state.jobPollers.get(key));
+      state.jobPollers.delete(key);
+    }
+    const firstJob = await runTick();
+    if (firstJob && TERMINAL_JOB_STATUSES.has(firstJob.status)) {
+      return;
+    }
+    const timer = setInterval(wrappedTick, handlers.intervalMs || 1500);
+    state.jobPollers.set(key, timer);
+  }
+
+  function showPendingJob(elId, job, label) {
+    const eventMessages = (job.events || []).slice(-3).map((event) => `${event.event_type}: ${event.message}`);
+    showTaskResultInfo(
+      elId,
+      `${label} ${job.status.toUpperCase()}`,
+      latestJobMessage(job),
+      eventMessages
+    );
+  }
+
+  async function queueBackgroundJob(config) {
+    const submission = await config.submit();
+    if (config.onQueued) {
+      config.onQueued(submission);
+    }
+    log(`${config.label} job queued.`, "success");
+    await pollJob(submission.job_id, {
+      onUpdate: (job) => {
+        if (config.onUpdate) config.onUpdate(job, submission);
+      },
+      onComplete: async (job) => {
+        if (config.onComplete) await config.onComplete(job, submission);
+      },
+      onError: (err) => {
+        if (config.onError) {
+          config.onError(err, submission);
+        } else {
+          log(`${config.label} job error: ${err.message}`, "error");
+        }
+      },
+    });
+    return submission;
+  }
+
+  function renderMessageJobResult(job) {
+    if (job.status === "succeeded") {
+      showTaskResult("msg-result", job.result || {}, "message");
+      log(job.result?.message || "Message job completed.", "success");
+      return;
+    }
+    if (job.status === "failed" || job.status === "cancelled") {
+      showTaskResultError("msg-result", extractJobError(job));
+      log(`Messaging error: ${extractJobError(job)}`, "error");
+      return;
+    }
+    showPendingJob("msg-result", job, "Messaging");
+  }
+
+  function renderFriendJobResult(job) {
+    if (job.status === "succeeded") {
+      showTaskResult("friend-result", job.result || {}, "friend");
+      log(job.result?.message || "Friend request job completed.", job.result?.failed > 0 ? "error" : "success");
+      return;
+    }
+    if (job.status === "failed" || job.status === "cancelled") {
+      showTaskResultError("friend-result", extractJobError(job));
+      log(`Friend request error: ${extractJobError(job)}`, "error");
+      return;
+    }
+    showPendingJob("friend-result", job, "Friend request");
+  }
+
+  function renderGroupJobResult(job) {
+    const el = $("#group-result");
+    el.style.display = "block";
+    if (job.status === "succeeded") {
+      el.className = `task-result ${(job.result && job.result.success) ? "task-result--success" : "task-result--fail"}`;
+      el.innerHTML = `<div class="task-result__title">${job.result?.success ? "OK Message Sent" : "ERR Failed"}</div><div class="task-result__detail">${esc(job.result?.message || "Group job completed.")}</div>`;
+      log(job.result?.message || "Group job completed.", job.result?.success ? "success" : "error");
+      return;
+    }
+    if (job.status === "failed" || job.status === "cancelled") {
+      showTaskResultError("group-result", extractJobError(job));
+      log(`Group error: ${extractJobError(job)}`, "error");
+      return;
+    }
+    showPendingJob("group-result", job, "Group message");
+  }
+
+  function applyContactSyncResult(result) {
+    updateContactsMeta(result);
+    $("#contacts-result").style.display = "none";
+    if (result.contacts && result.contacts.length > 0) {
+      renderContacts(result);
+      setContactsStatus("success", result.message || `Loaded ${result.contact_count || result.contacts.length} stored contact(s).`);
+    } else {
+      $("#contacts-block").style.display = "none";
+      setContactsStatus("empty", result.message || "No stored contacts are available for this workspace.");
+    }
+  }
+
+  function renderContactSyncJob(job) {
+    if (job.status === "succeeded") {
+      applyContactSyncResult(job.result || {});
+      showTaskResultInfo("contacts-result", "Contact Sync Completed", job.result?.message || "Contact sync completed.");
+      log(job.result?.message || "Contact sync completed.", "success");
+      return;
+    }
+    if (job.status === "failed" || job.status === "cancelled") {
+      $("#contacts-block").style.display = "none";
+      setContactsStatus("error", extractJobError(job));
+      showTaskResultError("contacts-result", extractJobError(job));
+      log(`Contact sync error: ${extractJobError(job)}`, "error");
+      return;
+    }
+    setContactsStatus("progress", latestJobMessage(job));
+    showPendingJob("contacts-result", job, "Contact sync");
+  }
+
+  function renderCampaignExecutionJob(job) {
+    if (job.status === "succeeded") {
+      const result = job.result || {};
+      const campaign = result.campaign || {};
+      showTaskResult("msg-result", {
+        total: result.total || campaign.matched_count || 0,
+        sent: result.sent || campaign.sent_count || 0,
+        failed: result.failed || campaign.failed_count || 0,
+        results: (result.results || []).map((item) => ({
+          target: item.target,
+          success: item.success,
+          error: item.error,
+        })),
+        message: result.message || "Campaign completed.",
+      }, "message");
+      log(result.message || "Campaign completed.", (result.failed || 0) > 0 ? "error" : "success");
+      return;
+    }
+    if (job.status === "failed" || job.status === "cancelled") {
+      showTaskResultError("msg-result", extractJobError(job));
+      log(`Campaign execution error: ${extractJobError(job)}`, "error");
+      return;
+    }
+    showPendingJob("msg-result", job, "Campaign");
+  }
+
+  async function pollCampaignProgress(campaignId) {
+    const data = await apiRequest(`/api/campaigns/${campaignId}/progress`);
+    $("#campaign-progress").style.display = "block";
+    $("#campaign-progress-count").textContent = data.total ? `${data.sent}/${data.total} sent` : data.status;
+    (data.events || []).forEach((event) => {
+      appendCampaignProgressEvent(event);
+      if (event.message) {
+        log(
+          event.message,
+          event.level === "error" || event.success === false ? "error" : event.success === true ? "success" : ""
+        );
+      }
+    });
+    if (data.status === "succeeded" || data.status === "failed" || data.status === "cancelled") {
+      stopCampaignProgressPolling();
+    }
+    return data;
+  }
+
+  function startCampaignProgressPolling(campaignId, total = 0) {
+    stopCampaignProgressPolling();
+    resetCampaignProgressUI(total);
+    pollCampaignProgress(campaignId).catch(() => {});
+    state.campaignProgressPollInterval = setInterval(() => {
+      pollCampaignProgress(campaignId).catch((err) => {
+        log(`Campaign progress error: ${err.message}`, "error");
+        stopCampaignProgressPolling();
+      });
+    }, 1500);
   }
 
   function getManualTargetLines() {
@@ -190,8 +773,8 @@
   }
 
   function contactIsSelectedForPicker(contact) {
-    if (manualPickerState.mode === "campaign") {
-      return campaignSelectionState.selectedContacts.some((selected) => selected.identity_key === contact.identity_key);
+    if (state.manualPickerState.mode === "campaign") {
+      return state.campaignSelectionState.selectedContacts.some((selected) => selected.identity_key === contact.identity_key);
     }
     return getManualTargetLookup().has(normalizeSearchText(contact.name));
   }
@@ -204,35 +787,29 @@
 
   function filterManualPickerContacts() {
     const query = normalizeSearchText($("#contact-picker-search").value);
-    manualPickerState.filtered = manualPickerState.contacts.filter((contact) => {
-      return !query || normalizeSearchText(contact.name).includes(query);
-    });
+    state.manualPickerState.filtered = state.manualPickerState.contacts.filter((contact) => !query || normalizeSearchText(contact.name).includes(query));
   }
 
   function renderManualPickerList() {
     const list = $("#contact-picker-list");
-
-    if (manualPickerState.loading) {
+    if (state.manualPickerState.loading) {
       list.innerHTML = '<div class="picker-empty">Loading stored contacts...</div>';
       return;
     }
-
-    if (manualPickerState.error) {
-      list.innerHTML = `<div class="picker-empty">${esc(manualPickerState.error)}</div>`;
+    if (state.manualPickerState.error) {
+      list.innerHTML = `<div class="picker-empty">${esc(state.manualPickerState.error)}</div>`;
       return;
     }
-
-    if (!manualPickerState.contacts.length) {
+    if (!state.manualPickerState.contacts.length) {
       list.innerHTML = '<div class="picker-empty">No stored contacts yet. Sync contacts first in the Contacts tab.</div>';
       return;
     }
-
-    if (!manualPickerState.filtered.length) {
+    if (!state.manualPickerState.filtered.length) {
       list.innerHTML = '<div class="picker-empty">No stored contacts matched the current search.</div>';
       return;
     }
 
-    list.innerHTML = manualPickerState.filtered.map((contact) => {
+    list.innerHTML = state.manualPickerState.filtered.map((contact) => {
       const isAdded = contactIsSelectedForPicker(contact);
       const subtitleParts = [
         contact.identity_source || "unknown",
@@ -262,44 +839,47 @@
   }
 
   async function loadManualPickerContacts() {
-    manualPickerState.loading = true;
-    manualPickerState.error = "";
-    manualPickerState.contacts = [];
-    manualPickerState.filtered = [];
+    state.manualPickerState.loading = true;
+    state.manualPickerState.error = "";
+    state.manualPickerState.contacts = [];
+    state.manualPickerState.filtered = [];
     setContactPickerStatus("Loading stored contacts...", "loading");
     renderManualPickerList();
-
     try {
-      const res = await fetch("/api/contacts");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed to load stored contacts.");
-      manualPickerState.contacts = data.contacts || [];
-      manualPickerState.loaded = true;
+      const data = await apiRequest("/api/contacts");
+      state.manualPickerState.contacts = data.contacts || [];
+      state.manualPickerState.loaded = true;
       filterManualPickerContacts();
-      if (manualPickerState.contacts.length) {
-        setContactPickerStatus(`Loaded ${manualPickerState.contacts.length} stored contact(s). Select contacts to add them into ${manualPickerState.mode === "campaign" ? "campaign recipients" : "the manual target list"}.`, "success");
+      if (state.manualPickerState.contacts.length) {
+        setContactPickerStatus(
+          `Loaded ${state.manualPickerState.contacts.length} stored contact(s). Select contacts to add them into ${state.manualPickerState.mode === "campaign" ? "campaign recipients" : "the manual target list"}.`,
+          "success"
+        );
       } else {
         setContactPickerStatus("No stored contacts yet. Sync contacts first in the Contacts tab.", "empty");
       }
     } catch (err) {
-      manualPickerState.error = err.message;
+      state.manualPickerState.error = err.message;
       setContactPickerStatus(err.message, "error");
       log(`Contact picker load error: ${err.message}`, "error");
     } finally {
-      manualPickerState.loading = false;
+      state.manualPickerState.loading = false;
       renderManualPickerList();
     }
   }
 
   async function openManualPicker(mode = "manual") {
-    manualPickerState.mode = mode;
+    if (!state.auth.authenticated) {
+      setAuthMessage("Sign in first to load workspace contacts.", "error");
+      return;
+    }
+    state.manualPickerState.mode = mode;
     $("#contact-picker-title").textContent = mode === "campaign" ? "Choose Campaign Contacts" : "Choose Contacts";
     $(".picker-modal__sub").textContent = mode === "campaign"
       ? "Search your stored contacts and add them into the selected campaign recipients."
       : "Search your stored contacts and add names into the manual target list.";
-    const modal = $("#contact-picker-modal");
-    modal.style.display = "flex";
-    modal.setAttribute("aria-hidden", "false");
+    $("#contact-picker-modal").style.display = "flex";
+    $("#contact-picker-modal").setAttribute("aria-hidden", "false");
     document.body.classList.add("modal-open");
     $("#contact-picker-search").value = "";
     $("#contact-picker-search").focus();
@@ -307,75 +887,25 @@
   }
 
   function closeManualPicker() {
-    const modal = $("#contact-picker-modal");
-    modal.style.display = "none";
-    modal.setAttribute("aria-hidden", "true");
+    $("#contact-picker-modal").style.display = "none";
+    $("#contact-picker-modal").setAttribute("aria-hidden", "true");
     document.body.classList.remove("modal-open");
   }
 
-  function showTaskResult(elId, data, type) {
-    const el = $(`#${elId}`);
-    el.style.display = "block";
-    const isSuccess = data.failed === 0;
-    el.className = `task-result ${isSuccess ? "task-result--success" : "task-result--info"}`;
-    const icon = isSuccess ? "OK" : "WARN";
-    const list = data.results || [];
-    const items = list.length > 0
-      ? `<ul class="task-result__items">${
-          list.map((r) => {
-            const label = type === "friend" ? r.phone : r.target;
-            return r.success
-              ? `<li class="success">OK ${esc(label)}</li>`
-              : `<li class="fail">ERR ${esc(label)} - ${esc(r.error || "Unknown error")}</li>`;
-          }).join("")
-        }</ul>`
-      : "";
-
-    el.innerHTML = `
-      <div class="task-result__title">${icon} ${esc(data.message)}</div>
-      <div class="task-result__detail">Total: ${data.total} | Sent: ${data.sent} | Failed: ${data.failed}</div>
-      ${items}`;
-  }
-
-  function showTaskResultError(elId, message) {
-    const el = $(`#${elId}`);
-    el.style.display = "block";
-    el.className = "task-result task-result--fail";
-    el.innerHTML = `<div class="task-result__title">ERR Error</div><div class="task-result__detail">${esc(message)}</div>`;
-  }
-
-  function updateContactsMeta(data) {
-    $("#contacts-meta-count").textContent = String(data.stored_contact_count || 0);
-    $("#contacts-meta-status").textContent = data.last_sync_status || "Never synced";
-    $("#contacts-meta-time").textContent = data.last_sync_at ? formatTimestamp(data.last_sync_at) : "No stored sync yet";
-  }
-
-  function renderContacts(data) {
-    $("#contacts-block").style.display = "block";
-    $("#contacts-count-badge").textContent = `${data.stored_contact_count || data.contact_count} stored`;
-    $("#contacts-tbody").innerHTML = (data.contacts || []).map((c, index) => `
-      <tr>
-        <td>${index + 1}</td>
-        <td>${c.avatar_url ? `<img src="${c.avatar_url}" class="contact-avatar" alt="" />` : "-"}</td>
-        <td class="contact-name">${esc(c.name)}</td>
-        <td>${c.last_message ? esc(c.last_message) : "-"}</td>
-        <td>${c.unread ? '<span class="unread-dot"></span>' : "-"}</td>
-      </tr>
-    `).join("");
-  }
-
   async function loadStoredContacts() {
+    if (!state.auth.authenticated) {
+      clearContactsDisplay("Sign in to load contacts for the active workspace.");
+      return;
+    }
     try {
-      const res = await fetch("/api/contacts");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
+      const data = await apiRequest("/api/contacts");
       updateContactsMeta(data);
       if (data.contacts && data.contacts.length > 0) {
         renderContacts(data);
-        setContactsStatus(data.last_sync_status === "partial" ? "partial" : "success", data.message || `Loaded ${data.contact_count} stored contact(s).`);
+        setContactsStatus("success", data.message || `Loaded ${data.contact_count} stored contact(s).`);
       } else {
         $("#contacts-block").style.display = "none";
-        setContactsStatus("empty", data.message || "No stored contacts yet. Run a live sync to populate the contact store.");
+        setContactsStatus("empty", data.message || "No stored contacts yet. Run a sync job to populate the contact store.");
       }
     } catch (err) {
       $("#contacts-block").style.display = "none";
@@ -398,7 +928,7 @@
   function getCampaignFilters() {
     return {
       ...getCampaignDiscoveryFilters(),
-      selected_ids: campaignSelectionState.selectedContacts.map((contact) => contact.identity_key).filter(Boolean),
+      selected_ids: state.campaignSelectionState.selectedContacts.map((contact) => contact.identity_key).filter(Boolean),
     };
   }
 
@@ -411,52 +941,48 @@
   }
 
   function addCampaignContacts(contacts) {
-    const existing = new Map(campaignSelectionState.selectedContacts.map((contact) => [contact.identity_key, contact]));
+    const existing = new Map(state.campaignSelectionState.selectedContacts.map((contact) => [contact.identity_key, contact]));
     let added = 0;
     for (const contact of contacts) {
       if (!contact || !contact.identity_key || existing.has(contact.identity_key)) continue;
       existing.set(contact.identity_key, contact);
       added += 1;
     }
-    campaignSelectionState.selectedContacts = Array.from(existing.values());
+    state.campaignSelectionState.selectedContacts = Array.from(existing.values());
     renderCampaignSelection();
-    renderCampaignPreview(campaignSelectionState.previewContacts);
+    renderCampaignPreview(state.campaignSelectionState.previewContacts);
     return added;
   }
 
-  function removeCampaignContact(identityKey) {
-    campaignSelectionState.selectedContacts = campaignSelectionState.selectedContacts.filter(
-      (contact) => contact.identity_key !== identityKey,
-    );
+  function clearCampaignSelection() {
+    state.campaignSelectionState.selectedContacts = [];
     renderCampaignSelection();
-    renderCampaignPreview(campaignSelectionState.previewContacts);
+    renderCampaignPreview(state.campaignSelectionState.previewContacts);
   }
 
-  function clearCampaignSelection() {
-    campaignSelectionState.selectedContacts = [];
+  function removeCampaignContact(identityKey) {
+    state.campaignSelectionState.selectedContacts = state.campaignSelectionState.selectedContacts.filter((contact) => contact.identity_key !== identityKey);
     renderCampaignSelection();
-    renderCampaignPreview(campaignSelectionState.previewContacts);
+    renderCampaignPreview(state.campaignSelectionState.previewContacts);
   }
 
   function renderCampaignSelection() {
     const list = $("#campaign-selection-list");
     const count = $("#campaign-selected-count");
-    const contacts = campaignSelectionState.selectedContacts;
-    count.textContent = `${contacts.length} selected`;
-
-    if (!contacts.length) {
+    const selected = state.campaignSelectionState.selectedContacts;
+    count.textContent = `${selected.length} selected`;
+    if (!selected.length) {
       list.innerHTML = '<p class="field-hint">No campaign recipients selected yet. Preview matches, then add the contacts you want.</p>';
       return;
     }
-
-    list.innerHTML = contacts.map((contact) => `
-      <div class="campaign-selection__item">
-        <div class="campaign-selection__row">
-          <div class="campaign-selection__meta">
-            <span class="campaign-selection__name">${esc(contact.name)}</span>
-            <span class="campaign-selection__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
+    list.innerHTML = selected.map((contact) => `
+      <div class="campaign-history__item">
+        <div class="campaign-history__row">
+          <div class="campaign-history__meta">
+            <span class="campaign-history__name">${esc(contact.name)}</span>
+            <span class="campaign-history__sub">${esc(contact.identity_source || "unknown")} | ${contact.last_seen_at ? esc(formatTimestamp(contact.last_seen_at)) : "No last seen timestamp"}</span>
           </div>
-          <div class="campaign-selection__actions-inline">
+          <div class="campaign-history__actions">
             <span class="campaign-pill ${contact.unread ? "campaign-pill--warn" : "campaign-pill--muted"}">${contact.unread ? "Unread" : "Seen"}</span>
             <button class="btn btn--secondary btn--sm" type="button" data-campaign-remove="${esc(contact.identity_key)}">Remove</button>
           </div>
@@ -465,34 +991,25 @@
     `).join("");
   }
 
-  function buildContactsQuery(filters) {
-    const params = new URLSearchParams();
-    if (filters.search) params.set("search", filters.search);
-    if (filters.unread_only) params.set("unread_only", "true");
-    if (filters.identity_source && filters.identity_source !== "all") params.set("identity_source", filters.identity_source);
-    if (filters.sort_by) params.set("sort_by", filters.sort_by);
-    if (filters.sort_order) params.set("sort_order", filters.sort_order);
-    if (filters.selected_ids && filters.selected_ids.length > 0) params.set("selected_ids", filters.selected_ids.join(","));
-    return params.toString();
-  }
-
   async function previewCampaignMatches() {
     const filters = getCampaignDiscoveryFilters();
     const query = buildContactsQuery(filters);
-    const res = await fetch(`/api/contacts${query ? `?${query}` : ""}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    campaignSelectionState.previewContacts = data.contacts || [];
-    lastCampaignPreview = { filters, contacts: campaignSelectionState.previewContacts, storedContactCount: data.stored_contact_count || 0 };
-    renderCampaignPreview(campaignSelectionState.previewContacts);
-    return lastCampaignPreview;
+    const data = await apiRequest(`/api/contacts${query ? `?${query}` : ""}`);
+    state.campaignSelectionState.previewContacts = data.contacts || [];
+    state.lastCampaignPreview = {
+      filters,
+      contacts: state.campaignSelectionState.previewContacts,
+      storedContactCount: data.stored_contact_count || 0,
+    };
+    renderCampaignPreview(state.campaignSelectionState.previewContacts);
+    return state.lastCampaignPreview;
   }
 
   function renderCampaignPreview(contacts) {
     const preview = $("#campaign-preview");
     const list = $("#campaign-preview-list");
     const count = $("#campaign-preview-count");
-    const selectedIds = new Set(campaignSelectionState.selectedContacts.map((contact) => contact.identity_key));
+    const selectedIds = new Set(state.campaignSelectionState.selectedContacts.map((contact) => contact.identity_key));
     preview.style.display = "block";
     count.textContent = `${contacts.length} match(es)`;
     if (!contacts.length) {
@@ -519,17 +1036,19 @@
   }
 
   async function loadCampaignHistory() {
+    if (!state.auth.authenticated) {
+      $("#campaign-history-list").innerHTML = '<p class="field-hint">Sign in to load campaign history.</p>';
+      return;
+    }
     try {
-      const res = await fetch("/api/campaigns");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-      campaignHistoryCache = data.campaigns || [];
+      const data = await apiRequest("/api/campaigns");
+      state.campaignHistoryCache = data.campaigns || [];
       const list = $("#campaign-history-list");
-      if (!campaignHistoryCache.length) {
+      if (!state.campaignHistoryCache.length) {
         list.innerHTML = '<p class="field-hint">No campaigns yet.</p>';
         return;
       }
-      const visibleCampaigns = campaignHistoryCache.slice(0, 4);
+      const visibleCampaigns = state.campaignHistoryCache.slice(0, 4);
       list.innerHTML = visibleCampaigns.map((campaign) => `
         <div class="campaign-history__item">
           <div class="campaign-history__row">
@@ -544,8 +1063,8 @@
           </div>
         </div>
       `).join("");
-      if (campaignHistoryCache.length > visibleCampaigns.length) {
-        list.insertAdjacentHTML("beforeend", `<p class="field-hint">Showing latest ${visibleCampaigns.length} of ${campaignHistoryCache.length} campaigns.</p>`);
+      if (state.campaignHistoryCache.length > visibleCampaigns.length) {
+        list.insertAdjacentHTML("beforeend", `<p class="field-hint">Showing latest ${visibleCampaigns.length} of ${state.campaignHistoryCache.length} campaigns.</p>`);
       }
     } catch (err) {
       log(`Campaign history load error: ${err.message}`, "error");
@@ -553,20 +1072,23 @@
   }
 
   function loadCampaignIntoBuilder(campaignId) {
-    const campaign = campaignHistoryCache.find((item) => Number(item.campaign_id) === Number(campaignId));
+    const campaign = state.campaignHistoryCache.find((item) => Number(item.campaign_id) === Number(campaignId));
     if (!campaign) {
       log("Campaign not found in history.", "error");
       return;
     }
-
     $("#campaign-name").value = campaign.name || "";
     $("#msg-content").value = campaign.message || "";
     setCampaignFilters(campaign.filters || {});
-    campaignSelectionState.selectedContacts = (campaign.matched_contacts || []).slice();
+    state.campaignSelectionState.selectedContacts = campaign.matched_contacts || [];
+    state.campaignSelectionState.previewContacts = campaign.matched_contacts || [];
     renderCampaignSelection();
-    campaignSelectionState.previewContacts = [];
-    $("#campaign-preview").style.display = "none";
-    log(`Loaded campaign '${campaign.name}' into the builder.`, "success");
+    renderCampaignPreview(state.campaignSelectionState.previewContacts);
+    setMessageMode("campaign");
+    $("#toggle-message-mode").querySelectorAll(".toggle-btn").forEach((btn) => {
+      btn.classList.toggle("toggle-btn--active", btn.dataset.value === "campaign");
+    });
+    log(`Loaded campaign '${campaign.name}'.`, "success");
   }
 
   async function createCampaignDraft() {
@@ -574,45 +1096,49 @@
     const message = $("#msg-content").value.trim();
     if (!name) throw new Error("Campaign name is required.");
     if (!message) throw new Error("Campaign message cannot be empty.");
-    if (!campaignSelectionState.selectedContacts.length) {
+    if (!state.campaignSelectionState.selectedContacts.length) {
       throw new Error("Select at least one campaign recipient before saving.");
     }
-    const filters = getCampaignFilters();
-    const res = await fetch("/api/campaigns", {
+    const data = await apiRequest("/api/campaigns", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: {
         name,
         message,
-        filters,
-      }),
+        filters: getCampaignFilters(),
+      },
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
     await loadCampaignHistory();
     return data;
   }
 
   async function executeCampaignDraft() {
-    const campaignResult = await createCampaignDraft();
+    const draft = await createCampaignDraft();
     const delayMin = parseFloat($("#campaign-delay-min").value);
     const delayMax = parseFloat($("#campaign-delay-max").value);
-    const campaignId = campaignResult.campaign.campaign_id;
-    startCampaignProgressPolling(campaignId, campaignResult.campaign.matched_count || 0);
-    const res = await fetch(`/api/campaigns/${campaignId}/execute`, {
+    const campaignId = draft.campaign.campaign_id;
+    startCampaignProgressPolling(campaignId, draft.campaign.matched_count || 0);
+    const submission = await apiRequest(`/api/campaigns/${campaignId}/execute`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: {
         delay_min: Number.isFinite(delayMin) ? delayMin : 1,
         delay_max: Number.isFinite(delayMax) ? delayMax : 3,
-      }),
+      },
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    await pollCampaignProgress(campaignId).catch(() => {});
-    stopCampaignProgressPolling();
-    await loadCampaignHistory();
-    return data;
+    await pollJob(submission.job_id, {
+      onUpdate: (job) => renderCampaignExecutionJob(job),
+      onComplete: async (job) => {
+        renderCampaignExecutionJob(job);
+        stopCampaignProgressPolling();
+        await loadCampaignHistory();
+        await pollCampaignProgress(campaignId).catch(() => {});
+      },
+      onError: (err) => {
+        stopCampaignProgressPolling();
+        showTaskResultError("msg-result", err.message);
+        log(`Campaign execution error: ${err.message}`, "error");
+      },
+    });
+    return submission;
   }
 
   function setMessageMode(mode) {
@@ -625,161 +1151,167 @@
   function bindNavigation() {
     $$(".nav-item").forEach((btn) => {
       btn.addEventListener("click", () => {
+        if (btn.disabled) return;
         $$(".nav-item").forEach((item) => item.classList.remove("nav-item--active"));
         btn.classList.add("nav-item--active");
         const target = btn.dataset.module;
-        $$(".module").forEach((m) => {
-          m.style.display = m.id === `mod-${target}` ? "block" : "none";
+        $$(".module").forEach((module) => {
+          module.style.display = module.id === `mod-${target}` ? "block" : "none";
         });
-        if (target === "contacts") loadStoredContacts();
-        if (target === "messaging") loadCampaignHistory();
+        if (target === "contacts" && state.auth.authenticated) {
+          loadStoredContacts();
+        }
+        if (target === "messaging" && state.auth.authenticated) {
+          loadCampaignHistory();
+        }
       });
     });
   }
 
-  function bindLogin() {
-    const btnLoginStart = $("#btn-login-start");
-    const btnLoginStop = $("#btn-login-stop");
-    const loginStateIcon = $("#login-state-icon");
-    const loginStateText = $("#login-state-text");
-    const loginStateDetail = $("#login-state-detail");
-    const loginInfo = $("#login-info");
-    const loginName = $("#login-name");
-
-    btnLoginStart.addEventListener("click", async () => {
-      btnLoginStart.disabled = true;
-      btnLoginStop.disabled = false;
-      loginStateText.textContent = "Starting browser...";
-      loginStateDetail.textContent = "Please wait...";
-      loginStateIcon.className = "login-state login-state--waiting";
-      log("Starting login browser...");
+  function bindAuth() {
+    $("#btn-auth-login").addEventListener("click", async () => {
+      const email = $("#auth-email").value.trim();
+      const password = $("#auth-password").value;
+      if (!email) {
+        setAuthMessage("Email is required.", "error");
+        return;
+      }
+      if (!password) {
+        setAuthMessage("Password is required.", "error");
+        return;
+      }
+      const btn = $("#btn-auth-login");
+      btn.disabled = true;
+      btn.textContent = "Signing In...";
       try {
-        const res = await fetch("/api/login/start", { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Failed");
-        loginStateText.textContent = "Waiting for login";
-        loginStateDetail.textContent = "Scan QR code or enter phone number in the browser window.";
-        log("Browser opened - waiting for QR/phone login.");
-        startLoginPolling({ btnLoginStart, btnLoginStop, loginStateIcon, loginStateText, loginStateDetail, loginInfo, loginName });
+        const session = await apiRequest("/api/auth/login", {
+          method: "POST",
+          body: { email, password },
+        });
+        applyAuthSession(session, "success");
+        log(`Signed in as ${session.user.email}.`, "success");
+        await hydrateWorkspace();
       } catch (err) {
-        loginStateText.textContent = "Error";
-        loginStateDetail.textContent = err.message;
-        loginStateIcon.className = "login-state login-state--err";
-        btnLoginStart.disabled = false;
+        setAuthMessage(err.message, "error");
+        log(`Login error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Sign In";
+      }
+    });
+
+    $("#auth-password").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        $("#btn-auth-login").click();
+      }
+    });
+
+    $("#btn-auth-logout").addEventListener("click", async () => {
+      try {
+        await apiRequest("/api/auth/logout", { method: "POST", allowUnauthorized: true });
+      } catch {
+        // Ignore logout transport failures; local session state still resets.
+      }
+      handleSignedOut("Signed out. Sign in to continue.", true);
+      log("Signed out.", "success");
+    });
+
+    $("#workspace-select").addEventListener("change", async (event) => {
+      const workspaceId = event.target.value;
+      if (!workspaceId || workspaceId === state.auth.activeWorkspaceId) return;
+      const previousValue = state.auth.activeWorkspaceId;
+      event.target.disabled = true;
+      try {
+        const result = await apiRequest(`/api/workspaces/${workspaceId}/switch`, { method: "POST" });
+        state.auth.activeWorkspaceId = result.active_workspace_id;
+        const summary = state.auth.workspaces.find((workspace) => workspace.workspace_id === workspaceId);
+        if (summary) {
+          summary.login_state = result.workspace.login_state;
+        }
+        $("#dashboard-session-meta").textContent = result.workspace.name;
+        $("#auth-summary-workspace").textContent = result.workspace.name;
+        $("#auth-summary-role").textContent = result.workspace.role;
+        setAuthMessage(`Switched to workspace '${result.workspace.name}'.`, "success");
+        log(`Switched to workspace '${result.workspace.name}'.`, "success");
+        await hydrateWorkspace();
+      } catch (err) {
+        event.target.value = previousValue || "";
+        setAuthMessage(err.message, "error");
+        log(`Workspace switch error: ${err.message}`, "error");
+      } finally {
+        event.target.disabled = false;
+      }
+    });
+  }
+
+  function bindLogin() {
+    $("#btn-login-start").addEventListener("click", async () => {
+      if (!state.auth.authenticated) {
+        setAuthMessage("Sign in first to start the workspace login browser.", "error");
+        return;
+      }
+      const btnStart = $("#btn-login-start");
+      btnStart.disabled = true;
+      $("#btn-login-stop").disabled = false;
+      $("#login-state-text").textContent = "Starting browser...";
+      $("#login-state-detail").textContent = "Please wait...";
+      $("#login-state-icon").className = "login-state login-state--waiting";
+      log("Starting workspace login browser...");
+      try {
+        const data = await apiRequest("/api/login/start", { method: "POST" });
+        renderZaloLoginState(data);
+        log("Browser opened. Complete login in the remote browser session.");
+        startLoginPolling();
+      } catch (err) {
+        renderZaloLoginState({ state: "error", message: err.message });
         log(err.message, "error");
       }
     });
 
-    btnLoginStop.addEventListener("click", async () => {
+    $("#btn-login-stop").addEventListener("click", async () => {
       stopLoginPolling();
-      try { await fetch("/api/login/stop", { method: "POST" }); } catch {}
-      btnLoginStart.disabled = false;
-      btnLoginStop.disabled = true;
-      loginStateText.textContent = "Not connected";
-      loginStateDetail.textContent = 'Click "Start Login" to begin.';
-      loginStateIcon.className = "login-state";
-      loginInfo.style.display = "none";
-      log("Login browser closed.");
-    });
-  }
-
-  function startLoginPolling(ui) {
-    stopLoginPolling();
-    loginPollInterval = setInterval(async () => {
       try {
-        const res = await fetch("/api/login/status");
-        const data = await res.json();
-        if (data.state === "authenticated") {
-          stopLoginPolling();
-          ui.loginStateText.textContent = "Authenticated";
-          ui.loginStateDetail.textContent = data.profile_name ? `Logged in as: ${data.profile_name}` : "Session is active.";
-          ui.loginStateIcon.className = "login-state login-state--ok";
-          ui.loginStateIcon.innerHTML = '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2"><circle cx="24" cy="24" r="20"/><path d="M14 24l6 6 14-14" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-          ui.btnLoginStart.disabled = true;
-          if (data.profile_name) {
-            ui.loginInfo.style.display = "flex";
-            ui.loginName.textContent = data.profile_name;
-          }
-          log(`Authenticated as: ${data.profile_name || "Unknown"}`, "success");
-        } else if (data.state === "error" || data.state === "expired") {
-          stopLoginPolling();
-          ui.loginStateText.textContent = data.state === "expired" ? "Session Expired" : "Error";
-          ui.loginStateDetail.textContent = data.message;
-          ui.loginStateIcon.className = "login-state login-state--err";
-          ui.btnLoginStart.disabled = false;
-          log(data.message, "error");
-        } else if (data.state === "idle") {
-          stopLoginPolling();
-          ui.loginStateText.textContent = "Not connected";
-          ui.loginStateDetail.textContent = data.message;
-          ui.loginStateIcon.className = "login-state";
-          ui.btnLoginStart.disabled = false;
-          ui.btnLoginStop.disabled = true;
-        }
-      } catch {}
-    }, 2500);
-  }
-
-  function stopLoginPolling() {
-    if (loginPollInterval) {
-      clearInterval(loginPollInterval);
-      loginPollInterval = null;
-    }
+        const data = await apiRequest("/api/login/stop", { method: "POST" });
+        renderZaloLoginState(data);
+      } catch (err) {
+        renderZaloLoginState({ state: "error", message: err.message });
+      }
+    });
   }
 
   function bindMessaging() {
-    $("#btn-open-contact-picker").addEventListener("click", () => {
-      openManualPicker("manual");
-    });
-
-    $("#btn-campaign-open-contact-picker").addEventListener("click", () => {
-      openManualPicker("campaign");
-    });
-
+    $("#btn-open-contact-picker").addEventListener("click", () => openManualPicker("manual"));
+    $("#btn-campaign-open-contact-picker").addEventListener("click", () => openManualPicker("campaign"));
     $("#btn-clear-msg-targets").addEventListener("click", () => {
-      const textarea = $("#msg-targets");
-      if (!textarea.value.trim()) return;
-      textarea.value = "";
+      if (!$("#msg-targets").value.trim()) return;
+      $("#msg-targets").value = "";
       renderManualPickerList();
       log("Cleared manual target list.");
     });
-
-    $("#btn-close-contact-picker").addEventListener("click", () => {
-      closeManualPicker();
-    });
-
-    $("#contact-picker-backdrop").addEventListener("click", () => {
-      closeManualPicker();
-    });
-
+    $("#btn-close-contact-picker").addEventListener("click", closeManualPicker);
+    $("#contact-picker-backdrop").addEventListener("click", closeManualPicker);
     $("#contact-picker-search").addEventListener("input", () => {
       filterManualPickerContacts();
       renderManualPickerList();
     });
-
     $("#contact-picker-list").addEventListener("click", (event) => {
       const btn = event.target.closest("button[data-contact-name]");
       if (!btn) return;
       const name = btn.dataset.contactName || "";
       if (!name) return;
-      if (manualPickerState.mode === "campaign") {
+      if (state.manualPickerState.mode === "campaign") {
         const identityKey = btn.dataset.contactIdentity || "";
-        const contact = manualPickerState.contacts.find((item) => item.identity_key === identityKey);
+        const contact = state.manualPickerState.contacts.find((item) => item.identity_key === identityKey);
         if (!contact) return;
         const added = addCampaignContacts([contact]);
         renderManualPickerList();
-        log(
-          added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`,
-          added ? "success" : ""
-        );
+        log(added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`, added ? "success" : "");
         return;
       }
       const added = appendManualTarget(name);
       renderManualPickerList();
-      log(
-        added ? `Added '${name}' to manual targets.` : `'${name}' is already in the manual target list.`,
-        added ? "success" : ""
-      );
+      log(added ? `Added '${name}' to manual targets.` : `'${name}' is already in the manual target list.`, added ? "success" : "");
     });
 
     document.addEventListener("keydown", (event) => {
@@ -792,20 +1324,17 @@
       const btn = event.target.closest("button[data-campaign-add]");
       if (!btn) return;
       const identityKey = btn.dataset.campaignAdd;
-      const contact = campaignSelectionState.previewContacts.find((item) => item.identity_key === identityKey);
+      const contact = state.campaignSelectionState.previewContacts.find((item) => item.identity_key === identityKey);
       if (!contact) return;
       const added = addCampaignContacts([contact]);
-      log(
-        added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`,
-        added ? "success" : ""
-      );
+      log(added ? `Added '${contact.name}' to campaign recipients.` : `'${contact.name}' is already selected for this campaign.`, added ? "success" : "");
     });
 
     $("#campaign-selection-list").addEventListener("click", (event) => {
       const btn = event.target.closest("button[data-campaign-remove]");
       if (!btn) return;
       const identityKey = btn.dataset.campaignRemove;
-      const contact = campaignSelectionState.selectedContacts.find((item) => item.identity_key === identityKey);
+      const contact = state.campaignSelectionState.selectedContacts.find((item) => item.identity_key === identityKey);
       removeCampaignContact(identityKey);
       if (contact) {
         log(`Removed '${contact.name}' from campaign recipients.`);
@@ -819,21 +1348,18 @@
     });
 
     $("#btn-campaign-clear-selection").addEventListener("click", () => {
-      if (!campaignSelectionState.selectedContacts.length) return;
+      if (!state.campaignSelectionState.selectedContacts.length) return;
       clearCampaignSelection();
       log("Cleared campaign recipient selection.");
     });
 
     $("#btn-campaign-add-all").addEventListener("click", () => {
-      if (!campaignSelectionState.previewContacts.length) {
+      if (!state.campaignSelectionState.previewContacts.length) {
         log("Preview matches first, then add contacts to the campaign.", "error");
         return;
       }
-      const added = addCampaignContacts(campaignSelectionState.previewContacts);
-      log(
-        added > 0 ? `Added ${added} contact(s) to campaign recipients.` : "All previewed contacts are already selected.",
-        added > 0 ? "success" : ""
-      );
+      const added = addCampaignContacts(state.campaignSelectionState.previewContacts);
+      log(added > 0 ? `Added ${added} contact(s) to campaign recipients.` : "All previewed contacts are already selected.", added > 0 ? "success" : "");
     });
 
     $("#btn-msg-send").addEventListener("click", async () => {
@@ -841,31 +1367,32 @@
       const message = $("#msg-content").value.trim();
       if (!raw) return alert("Enter target phone numbers or names.");
       if (!message) return alert("Enter a message.");
-
       const targets = raw.split("\n").map((line) => line.trim()).filter(Boolean);
       const delayMin = parseFloat($("#msg-delay-min").value) || 15;
       const delayMax = parseFloat($("#msg-delay-max").value) || 30;
       const btn = $("#btn-msg-send");
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-inline"></span> Sending...';
-      log(`Sending message to ${targets.length} target(s)...`);
-
+      btn.innerHTML = '<span class="spinner-inline"></span> Queueing...';
       try {
-        const res = await fetch("/api/message/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ targets, message, delay_min: delayMin, delay_max: delayMax }),
+        await queueBackgroundJob({
+          label: "Messaging",
+          submit: () => apiRequest("/api/message/send", {
+            method: "POST",
+            body: { targets, message, delay_min: delayMin, delay_max: delayMax },
+          }),
+          onQueued: (submission) => {
+            showTaskResultInfo("msg-result", "Messaging queued", `Job ${submission.job_id} is waiting for the worker.`);
+          },
+          onUpdate: (job) => renderMessageJobResult(job),
+          onComplete: (job) => renderMessageJobResult(job),
+          onError: (err) => {
+            showTaskResultError("msg-result", err.message);
+            log(`Messaging error: ${err.message}`, "error");
+          },
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Failed");
-        showTaskResult("msg-result", data, "message");
-        log(`Messaging done: ${data.sent}/${data.total} sent, ${data.failed} failed.`, data.failed > 0 ? "error" : "success");
-      } catch (err) {
-        showTaskResultError("msg-result", err.message);
-        log(`Messaging error: ${err.message}`, "error");
       } finally {
         btn.disabled = false;
-        btn.innerHTML = 'Send Messages';
+        btn.innerHTML = "Send Messages";
       }
     });
 
@@ -890,28 +1417,17 @@
     $("#btn-campaign-execute").addEventListener("click", async () => {
       const btn = $("#btn-campaign-execute");
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-inline"></span> Executing...';
+      btn.innerHTML = '<span class="spinner-inline"></span> Queueing...';
       try {
-        const data = await executeCampaignDraft();
-        showTaskResult("msg-result", {
-          total: data.campaign.matched_count,
-          sent: data.campaign.sent_count,
-          failed: data.campaign.failed_count,
-          results: data.campaign.results.map((item) => ({
-            target: item.target,
-            success: item.success,
-            error: item.error,
-          })),
-          message: data.message,
-        }, "message");
-        log(data.message, data.campaign.failed_count > 0 ? "error" : "success");
+        const submission = await executeCampaignDraft();
+        showTaskResultInfo("msg-result", "Campaign queued", `Job ${submission.job_id} is waiting for the worker.`);
       } catch (err) {
         stopCampaignProgressPolling();
         showTaskResultError("msg-result", err.message);
         log(`Campaign execution error: ${err.message}`, "error");
       } finally {
         btn.disabled = false;
-        btn.innerHTML = 'Save + Execute';
+        btn.innerHTML = "Save + Execute";
       }
     });
 
@@ -936,24 +1452,25 @@
       const greeting = $("#friend-greeting").value.trim() || null;
       const btn = $("#btn-friend-send");
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-inline"></span> Sending...';
-      log(`Sending ${phoneNumbers.length} friend request(s)...`);
+      btn.innerHTML = '<span class="spinner-inline"></span> Queueing...';
       try {
-        const res = await fetch("/api/friends/add", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone_numbers: phoneNumbers, greeting_message: greeting }),
+        await queueBackgroundJob({
+          label: "Friend request",
+          submit: () => apiRequest("/api/friends/add", {
+            method: "POST",
+            body: { phone_numbers: phoneNumbers, greeting_message: greeting },
+          }),
+          onQueued: (submission) => showTaskResultInfo("friend-result", "Friend requests queued", `Job ${submission.job_id} is waiting for the worker.`),
+          onUpdate: (job) => renderFriendJobResult(job),
+          onComplete: (job) => renderFriendJobResult(job),
+          onError: (err) => {
+            showTaskResultError("friend-result", err.message);
+            log(`Friend request error: ${err.message}`, "error");
+          },
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Failed");
-        showTaskResult("friend-result", data, "friend");
-        log(`Friend requests: ${data.sent}/${data.total} sent.`, data.failed > 0 ? "error" : "success");
-      } catch (err) {
-        showTaskResultError("friend-result", err.message);
-        log(`Friend request error: ${err.message}`, "error");
       } finally {
         btn.disabled = false;
-        btn.innerHTML = 'Send Friend Requests';
+        btn.innerHTML = "Send Friend Requests";
       }
     });
   }
@@ -966,33 +1483,25 @@
       if (!message) return alert("Enter a message.");
       const btn = $("#btn-group-send");
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-inline"></span> Sending...';
-      log(`Sending message to group "${groupName}"...`);
+      btn.innerHTML = '<span class="spinner-inline"></span> Queueing...';
       try {
-        const res = await fetch("/api/groups/message", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ group_name: groupName, message }),
+        await queueBackgroundJob({
+          label: "Group message",
+          submit: () => apiRequest("/api/groups/message", {
+            method: "POST",
+            body: { group_name: groupName, message },
+          }),
+          onQueued: (submission) => showTaskResultInfo("group-result", "Group message queued", `Job ${submission.job_id} is waiting for the worker.`),
+          onUpdate: (job) => renderGroupJobResult(job),
+          onComplete: (job) => renderGroupJobResult(job),
+          onError: (err) => {
+            showTaskResultError("group-result", err.message);
+            log(`Group error: ${err.message}`, "error");
+          },
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Failed");
-        const el = $("#group-result");
-        el.style.display = "block";
-        if (data.success) {
-          el.className = "task-result task-result--success";
-          el.innerHTML = `<div class="task-result__title">OK Message Sent</div><div class="task-result__detail">${esc(data.message)}</div>`;
-          log(`Group message sent to "${groupName}".`, "success");
-        } else {
-          el.className = "task-result task-result--fail";
-          el.innerHTML = `<div class="task-result__title">ERR Failed</div><div class="task-result__detail">${esc(data.message)}</div>`;
-          log(`Group message failed: ${data.message}`, "error");
-        }
-      } catch (err) {
-        showTaskResultError("group-result", err.message);
-        log(`Group error: ${err.message}`, "error");
       } finally {
         btn.disabled = false;
-        btn.innerHTML = 'Send to Group';
+        btn.innerHTML = "Send to Group";
       }
     });
   }
@@ -1001,57 +1510,47 @@
     $("#btn-sync-contacts").addEventListener("click", async () => {
       const btn = $("#btn-sync-contacts");
       btn.disabled = true;
-      setContactsStatus("progress", "Live sync in progress. Stored contacts will refresh when Zalo sync completes.");
-      $("#contacts-block").style.display = "none";
-      btn.innerHTML = '<span class="spinner-inline"></span> Syncing...';
-      log("Syncing contacts...");
+      btn.innerHTML = '<span class="spinner-inline"></span> Queueing...';
       try {
-        const res = await fetch("/api/contacts/sync", { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Failed");
-        updateContactsMeta(data);
-        if (data.sync_status === "success" && data.contacts && data.contacts.length > 0) {
-          renderContacts(data);
-          setContactsStatus("success", data.message || `Synced ${data.contact_count} contact(s).`);
-          log(`Synced ${data.contact_count} contact(s).`, "success");
-        } else if (data.sync_status === "partial" && data.contacts && data.contacts.length > 0) {
-          renderContacts(data);
-          setContactsStatus("partial", data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`);
-          log(data.message || `Collected ${data.contact_count} contact(s), but sync is incomplete.`, "error");
-        } else if (data.sync_status === "empty") {
-          $("#contacts-block").style.display = "none";
-          setContactsStatus("empty", data.message || "The contact list appears to be empty.");
-          log(data.message || "No contacts found.", "success");
-        } else {
-          $("#contacts-block").style.display = "none";
-          setContactsStatus("error", data.message || "Contact sync failed.");
-          log(data.message || "Contact sync failed.", "error");
-        }
-      } catch (err) {
-        $("#contacts-block").style.display = "none";
-        setContactsStatus("error", err.message);
-        log(`Contact sync error: ${err.message}`, "error");
+        await queueBackgroundJob({
+          label: "Contact sync",
+          submit: () => apiRequest("/api/contacts/sync", { method: "POST" }),
+          onQueued: (submission) => {
+            $("#contacts-block").style.display = "none";
+            setContactsStatus("progress", `Sync job ${submission.job_id} queued. Waiting for the worker.`);
+            showTaskResultInfo("contacts-result", "Contact Sync Queued", `Job ${submission.job_id} is waiting for the worker.`);
+          },
+          onUpdate: (job) => renderContactSyncJob(job),
+          onComplete: (job) => renderContactSyncJob(job),
+          onError: (err) => {
+            $("#contacts-block").style.display = "none";
+            setContactsStatus("error", err.message);
+            showTaskResultError("contacts-result", err.message);
+            log(`Contact sync error: ${err.message}`, "error");
+          },
+        });
       } finally {
         btn.disabled = false;
-        btn.innerHTML = 'Sync Contacts';
+        btn.innerHTML = "Sync Contacts";
       }
     });
   }
 
   async function loadSettings() {
+    if (!state.auth.authenticated) return;
     try {
-      const res = await fetch("/api/settings");
-      if (!res.ok) return;
-      const s = await res.json();
-      setToggle("toggle-lang", s.language);
-      setToggle("toggle-theme", s.theme);
-      setToggle("toggle-layout", s.layout);
-      $("#proxy-toggle").checked = s.proxy_enabled;
-      $("#proxy-fields").style.display = s.proxy_enabled ? "block" : "none";
-      $("#proxy-raw").value = formatLegacyProxyValue(s);
-      $("#setting-delay-min").value = s.delay_min;
-      $("#setting-delay-max").value = s.delay_max;
-    } catch {}
+      const settings = await apiRequest("/api/settings");
+      setToggle("toggle-lang", settings.language);
+      setToggle("toggle-theme", settings.theme);
+      setToggle("toggle-layout", settings.layout);
+      $("#proxy-toggle").checked = settings.proxy_enabled;
+      $("#proxy-fields").style.display = settings.proxy_enabled ? "block" : "none";
+      $("#proxy-raw").value = formatLegacyProxyValue(settings);
+      $("#setting-delay-min").value = settings.delay_min;
+      $("#setting-delay-max").value = settings.delay_max;
+    } catch (err) {
+      log(`Settings load error: ${err.message}`, "error");
+    }
   }
 
   function bindSettings() {
@@ -1059,18 +1558,18 @@
       if (group.id === "toggle-message-mode") return;
       group.querySelectorAll(".toggle-btn").forEach((btn) => {
         btn.addEventListener("click", () => {
-          group.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("toggle-btn--active"));
+          group.querySelectorAll(".toggle-btn").forEach((item) => item.classList.remove("toggle-btn--active"));
           btn.classList.add("toggle-btn--active");
         });
       });
     });
 
-    $("#proxy-toggle").addEventListener("change", (e) => {
-      $("#proxy-fields").style.display = e.target.checked ? "block" : "none";
+    $("#proxy-toggle").addEventListener("change", (event) => {
+      $("#proxy-fields").style.display = event.target.checked ? "block" : "none";
     });
 
     $("#btn-save-settings").addEventListener("click", async () => {
-      const settings = {
+      const settingsPayload = {
         language: getToggle("toggle-lang"),
         theme: getToggle("toggle-theme"),
         layout: getToggle("toggle-layout"),
@@ -1082,15 +1581,10 @@
         delay_max: parseFloat($("#setting-delay-max").value) || 30,
       };
       try {
-        const res = await fetch("/api/settings", {
+        const saved = await apiRequest("/api/settings", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(settings),
+          body: settingsPayload,
         });
-        if (!res.ok) {
-          throw new Error(await readErrorMessage(res, "Failed to save settings."));
-        }
-        const saved = await res.json();
         $("#proxy-raw").value = formatLegacyProxyValue(saved);
         log("Settings saved.", "success");
       } catch (err) {
@@ -1102,17 +1596,17 @@
   async function initialize() {
     checkHealth();
     bindNavigation();
+    bindAuth();
     bindLogin();
     bindMessaging();
     bindFriends();
     bindGroups();
     bindContacts();
     bindSettings();
-    await loadSettings();
-    await loadStoredContacts();
-    await loadCampaignHistory();
     renderCampaignSelection();
     setMessageMode("manual");
+    handleSignedOut("Sign in to unlock workspace data and automation actions.", true);
+    await bootstrapSession();
   }
 
   initialize();
