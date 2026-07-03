@@ -97,9 +97,8 @@ def _driver_settings_provider(workspace_id: UUID):
 
 async def _workspace_driver(workspace_id: UUID) -> object:
     with session_scope() as db:
-        session_row = ensure_workspace_session(db, workspace_id)
-        profile_path = session_row.profile_path
-    return await get_driver(str(workspace_id), profile_path, _driver_settings_provider(workspace_id))
+        ensure_workspace_session(db, workspace_id, settings)
+    return await get_driver(str(workspace_id), settings, _driver_settings_provider(workspace_id))
 
 
 @asynccontextmanager

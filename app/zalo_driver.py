@@ -27,7 +27,7 @@ from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
-from app.config import get_settings
+from app.config import Settings
 from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
 from app.models import (
     AppSettings,
@@ -43,7 +43,6 @@ from app.proxy_config import parse_proxy_settings
 logger = logging.getLogger("zalo_driver")
 
 ZALO_CHAT_URL = "https://chat.zalo.me/"
-APP_SETTINGS = get_settings()
 SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SEND_DEBUG_ENABLED = (
     os.getenv("ZALO_SEND_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -139,11 +138,13 @@ class ZaloDriver:
     All Playwright calls use sync_api in a dedicated thread.
     """
 
-    def __init__(self, workspace_key: str, profile_path: str, settings_provider: Callable[[], AppSettings]):
+    def __init__(self, workspace_key: str, deployment_settings: Settings, settings_provider: Callable[[], AppSettings]):
         self.workspace_key = workspace_key
-        self.profile_path = Path(profile_path)
+        self._deployment_settings = deployment_settings
+        self.profile_path = (deployment_settings.browser_profiles_root / workspace_key).resolve()
+        self.profile_path.mkdir(parents=True, exist_ok=True)
         self._settings_provider = settings_provider
-        self._debug_dir = APP_SETTINGS.sync_debug_root / workspace_key
+        self._debug_dir = deployment_settings.sync_debug_root / workspace_key
         self._pw: Optional[Playwright] = None
         self._login_context: Optional[BrowserContext] = None
         self._login_page: Optional[Page] = None
@@ -151,6 +152,22 @@ class ZaloDriver:
         self._profile_name: Optional[str] = None
         self._profile_avatar: Optional[str] = None
         self._worker_browser: Optional[Browser] = None
+        logger.info(
+            "Initialized ZaloDriver workspace=%s host_identity=%s display=%s profile_path=%s",
+            self.workspace_key,
+            self._deployment_settings.host_identity,
+            self._deployment_settings.login_display,
+            self.profile_path,
+        )
+
+    def matches_deployment_settings(self, deployment_settings: Settings) -> bool:
+        expected_profile_path = (deployment_settings.browser_profiles_root / self.workspace_key).resolve()
+        return (
+            self.profile_path == expected_profile_path
+            and self._deployment_settings.host_identity == deployment_settings.host_identity
+            and self._deployment_settings.login_display == deployment_settings.login_display
+            and self._deployment_settings.sync_debug_root.resolve() == deployment_settings.sync_debug_root.resolve()
+        )
 
     # ═══════════════════════════════════════════════════════════
     #  LIFECYCLE (sync, runs in thread)
@@ -173,6 +190,35 @@ class ZaloDriver:
         except Exception as exc:
             logger.warning(f"Failed to load settings for browser launch: {exc}")
             return AppSettings()
+
+    def _browser_launch_env(self) -> dict[str, str]:
+        launch_env = os.environ.copy()
+        if self._deployment_settings.login_display:
+            launch_env["DISPLAY"] = self._deployment_settings.login_display
+        return launch_env
+
+    def _persistent_context_kwargs(self, *, proxy: Optional[dict], viewport: dict[str, int]) -> dict:
+        return {
+            "user_data_dir": str(self.profile_path),
+            "channel": "chrome",
+            "headless": False,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
+                "--disable-site-isolation-trials",
+            ],
+            "viewport": viewport,
+            "locale": "vi-VN",
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "proxy": proxy,
+            "env": self._browser_launch_env(),
+        }
 
     def _get_launch_proxy_config(self) -> Optional[dict]:
         settings = self._load_runtime_settings()
@@ -232,29 +278,18 @@ class ZaloDriver:
 
         self.profile_path.mkdir(parents=True, exist_ok=True)
         proxy = self._get_launch_proxy_config()
-        if proxy:
-            logger.info(f"Launching login browser with proxy {proxy.get('server')}")
+        logger.info(
+            "Launching login browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+            self.workspace_key,
+            self._deployment_settings.host_identity,
+            self._deployment_settings.login_display,
+            self.profile_path,
+            proxy.get("server") if proxy else None,
+        )
 
         try:
             self._login_context = self._pw.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_path),
-                channel="chrome",
-                headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
-                    "--disable-site-isolation-trials"
-                ],
-                viewport={"width": 1280, "height": 800},
-                locale="vi-VN",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                proxy=proxy,
+                **self._persistent_context_kwargs(proxy=proxy, viewport={"width": 1280, "height": 800}),
             )
         except Exception as exc:
             if proxy:
@@ -333,28 +368,17 @@ class ZaloDriver:
 
         if self.profile_path.exists():
             proxy = self._get_launch_proxy_config()
-            if proxy:
-                logger.info(f"Launching worker browser with proxy {proxy.get('server')}")
+            logger.info(
+                "Launching worker browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+                self.workspace_key,
+                self._deployment_settings.host_identity,
+                self._deployment_settings.login_display,
+                self.profile_path,
+                proxy.get("server") if proxy else None,
+            )
             try:
                 return self._pw.chromium.launch_persistent_context(
-                    user_data_dir=str(self.profile_path),
-                    channel="chrome",
-                    headless=False,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-web-security",
-                        "--disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls",
-                        "--disable-site-isolation-trials"
-                    ],
-                    viewport={"width": 1440, "height": 900},
-                    locale="vi-VN",
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                    proxy=proxy,
+                    **self._persistent_context_kwargs(proxy=proxy, viewport={"width": 1440, "height": 900}),
                 )
             except Exception as exc:
                 if proxy:
@@ -2092,10 +2116,25 @@ class ZaloDriver:
 _drivers: dict[str, ZaloDriver] = {}
 
 
-async def get_driver(workspace_key: str, profile_path: str, settings_provider: Callable[[], AppSettings]) -> ZaloDriver:
+async def get_driver(workspace_key: str, deployment_settings: Settings, settings_provider: Callable[[], AppSettings]) -> ZaloDriver:
     driver = _drivers.get(workspace_key)
+    if driver is not None and not driver.matches_deployment_settings(deployment_settings):
+        logger.info(
+            "Recreating ZaloDriver workspace=%s due to deployment config change host_identity=%s display=%s profile_path=%s",
+            workspace_key,
+            deployment_settings.host_identity,
+            deployment_settings.login_display,
+            (deployment_settings.browser_profiles_root / workspace_key).resolve(),
+        )
+        await driver.shutdown()
+        driver = None
+        _drivers.pop(workspace_key, None)
     if driver is None:
-        driver = ZaloDriver(workspace_key=workspace_key, profile_path=profile_path, settings_provider=settings_provider)
+        driver = ZaloDriver(
+            workspace_key=workspace_key,
+            deployment_settings=deployment_settings,
+            settings_provider=settings_provider,
+        )
         _drivers[workspace_key] = driver
     return driver
 
