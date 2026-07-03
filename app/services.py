@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import sqlite3
 import uuid
@@ -82,6 +83,8 @@ ROLE_ORDER = {
     MembershipRole.OPERATOR: 2,
     MembershipRole.ADMIN: 3,
 }
+
+logger = logging.getLogger("services")
 
 
 def slugify(value: str) -> str:
@@ -181,16 +184,49 @@ def ensure_worker_node(db: Session, settings: Settings | None = None) -> WorkerN
 def ensure_workspace_session(db: Session, workspace_id: uuid.UUID, settings: Settings | None = None) -> WorkspaceSession:
     cfg = settings or get_settings()
     ensure_worker_node(db, cfg)
+    expected_profile_path = workspace_profile_path(workspace_id, cfg)
     session_row = db.get(WorkspaceSession, workspace_id)
     if session_row is None:
         session_row = WorkspaceSession(
             workspace_id=workspace_id,
             owner_worker_id=cfg.host_identity,
             login_state=WorkspaceLoginState.IDLE,
-            profile_path=workspace_profile_path(workspace_id, cfg),
+            profile_path=expected_profile_path,
         )
         db.add(session_row)
         db.flush()
+        return session_row
+
+    original_owner_worker_id = session_row.owner_worker_id
+    original_profile_path = session_row.profile_path
+    reset_login_state = False
+
+    if session_row.profile_path != expected_profile_path:
+        session_row.profile_path = expected_profile_path
+        session_row.login_state = WorkspaceLoginState.IDLE
+        session_row.profile_name = None
+        session_row.profile_avatar_url = None
+        session_row.phone_number = None
+        session_row.last_authenticated_at = None
+        session_row.last_validated_at = None
+        session_row.error_message = None
+        reset_login_state = True
+
+    if session_row.owner_worker_id != cfg.host_identity:
+        session_row.owner_worker_id = cfg.host_identity
+
+    if reset_login_state or session_row.owner_worker_id != original_owner_worker_id:
+        logger.info(
+            "Reconciled workspace session workspace_id=%s owner_worker_id=%s->%s profile_path=%s->%s reset_login=%s",
+            workspace_id,
+            original_owner_worker_id,
+            session_row.owner_worker_id,
+            original_profile_path,
+            session_row.profile_path,
+            reset_login_state,
+        )
+        db.flush()
+
     return session_row
 
 
@@ -205,7 +241,7 @@ def serialize_user(user: User) -> UserSummary:
 
 def _serialize_workspace_membership(db: Session, membership: WorkspaceMembership) -> WorkspaceSummary:
     workspace = db.get(Workspace, membership.workspace_id)
-    session_row = db.get(WorkspaceSession, membership.workspace_id)
+    session_row = ensure_workspace_session(db, membership.workspace_id)
     return WorkspaceSummary(
         workspace_id=workspace.id,
         slug=workspace.slug,

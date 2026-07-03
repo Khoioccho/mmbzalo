@@ -52,9 +52,8 @@ def _settings_provider(workspace_id: UUID):
 
 async def _driver_for_workspace(workspace_id: UUID):
     with session_scope() as db:
-        session_row = ensure_workspace_session(db, workspace_id)
-        profile_path = session_row.profile_path
-    return await get_driver(str(workspace_id), profile_path, _settings_provider(workspace_id))
+        ensure_workspace_session(db, workspace_id, settings)
+    return await get_driver(str(workspace_id), settings, _settings_provider(workspace_id))
 
 
 def _mark_workspace_session_expired(workspace_id: UUID, message: str) -> None:
