@@ -1,0 +1,64 @@
+{
+    "job_id": "1aebac2a-e338-4d29-81a2-6c26e6f6e75c",
+    "workspace_id": "d5ad8308-55df-4e97-b283-14737089fe25",
+    "type": "contact_sync",
+    "status": "failed",
+    "failure_class": "permanent",
+    "cancel_requested": false,
+    "attempt_count": 1,
+    "max_attempts": 3,
+    "payload": {},
+    "result": {
+        "message": "BrowserType.launch_persistent_context: Target page, context or browser has been closed\nBrowser logs:\n\n<launching> /opt/google/chrome/chrome --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AcceptCHFrame,AutoExpandDetailsElement,AvoidUnnecessaryBeforeUnloadCheckSync,CertificateTransparencyComponentUpdater,DeferRendererTasksAfterInput,DestroyProfileOnBrowserClose,DialMediaRouteProvider,ExtensionManifestV2Disabled,GlobalMediaControls,HttpsUpgrades,ImprovedCookieControls,LazyFrameLoading,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --disable-web-security --disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls --disable-site-isolation-trials --user-data-dir=/var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25 --remote-debugging-pipe about:blank\n<launched> pid=411842\n[pid=411842][err] [0704/002617.863201:WARNING:chrome/app/chrome_main_linux.cc:84] Read channel stable from /opt/google/chrome/CHROME_VERSION_EXTRA\n[pid=411842][err] [411842:411842:0704/002617.954624:ERROR:chrome/browser/process_singleton_posix.cc:347] Failed to create /var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25/SingletonLock: File exists (17)\n[pid=411842][err] [411842:411842:0704/002617.955047:ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory. This means that running multiple instances would start multiple browser processes rather than opening a new window in the existing process. Aborting now to avoid profile corruption.\nCall log:\n  - <launching> /opt/google/chrome/chrome --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AcceptCHFrame,AutoExpandDetailsElement,AvoidUnnecessaryBeforeUnloadCheckSync,CertificateTransparencyComponentUpdater,DeferRendererTasksAfterInput,DestroyProfileOnBrowserClose,DialMediaRouteProvider,ExtensionManifestV2Disabled,GlobalMediaControls,HttpsUpgrades,ImprovedCookieControls,LazyFrameLoading,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --disable-web-security --disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls --disable-site-isolation-trials --user-data-dir=/var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25 --remote-debugging-pipe about:blank\n  - <launched> pid=411842\n  - [pid=411842][err] [0704/002617.863201:WARNING:chrome/app/chrome_main_linux.cc:84] Read channel stable from /opt/google/chrome/CHROME_VERSION_EXTRA\n  - [pid=411842][err] [411842:411842:0704/002617.954624:ERROR:chrome/browser/process_singleton_posix.cc:347] Failed to create /var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25/SingletonLock: File exists (17)\n  - [pid=411842][err] [411842:411842:0704/002617.955047:ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory. This means that running multiple instances would start multiple browser processes rather than opening a new window in the existing process. Aborting now to avoid profile corruption.\n"
+    },
+    "created_at": "2026-07-04T00:26:15.001015+07:00",
+    "updated_at": "2026-07-04T00:26:17.973063+07:00",
+    "started_at": "2026-07-04T00:26:17.309114+07:00",
+    "finished_at": "2026-07-04T00:26:17.974465+07:00",
+    "events": [
+        {
+            "sequence_no": 1,
+            "level": "info",
+            "event_type": "queued",
+            "message": "contact_sync job queued.",
+            "target": null,
+            "route": null,
+            "success": null,
+            "payload": {},
+            "created_at": "2026-07-04T00:26:15.001015+07:00"
+        },
+        {
+            "sequence_no": 2,
+            "level": "info",
+            "event_type": "leased",
+            "message": "Job leased by inet-vps-01.",
+            "target": null,
+            "route": null,
+            "success": null,
+            "payload": {},
+            "created_at": "2026-07-04T00:26:17.286989+07:00"
+        },
+        {
+            "sequence_no": 3,
+            "level": "info",
+            "event_type": "started",
+            "message": "contact_sync job started.",
+            "target": null,
+            "route": null,
+            "success": null,
+            "payload": {},
+            "created_at": "2026-07-04T00:26:17.306570+07:00"
+        },
+        {
+            "sequence_no": 4,
+            "level": "error",
+            "event_type": "failed",
+            "message": "BrowserType.launch_persistent_context: Target page, context or browser has been closed\nBrowser logs:\n\n<launching> /opt/google/chrome/chrome --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AcceptCHFrame,AutoExpandDetailsElement,AvoidUnnecessaryBeforeUnloadCheckSync,CertificateTransparencyComponentUpdater,DeferRendererTasksAfterInput,DestroyProfileOnBrowserClose,DialMediaRouteProvider,ExtensionManifestV2Disabled,GlobalMediaControls,HttpsUpgrades,ImprovedCookieControls,LazyFrameLoading,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --disable-web-security --disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls --disable-site-isolation-trials --user-data-dir=/var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25 --remote-debugging-pipe about:blank\n<launched> pid=411842\n[pid=411842][err] [0704/002617.863201:WARNING:chrome/app/chrome_main_linux.cc:84] Read channel stable from /opt/google/chrome/CHROME_VERSION_EXTRA\n[pid=411842][err] [411842:411842:0704/002617.954624:ERROR:chrome/browser/process_singleton_posix.cc:347] Failed to create /var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25/SingletonLock: File exists (17)\n[pid=411842][err] [411842:411842:0704/002617.955047:ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory. This means that running multiple instances would start multiple browser processes rather than opening a new window in the existing process. Aborting now to avoid profile corruption.\nCall log:\n  - <launching> /opt/google/chrome/chrome --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=AcceptCHFrame,AutoExpandDetailsElement,AvoidUnnecessaryBeforeUnloadCheckSync,CertificateTransparencyComponentUpdater,DeferRendererTasksAfterInput,DestroyProfileOnBrowserClose,DialMediaRouteProvider,ExtensionManifestV2Disabled,GlobalMediaControls,HttpsUpgrades,ImprovedCookieControls,LazyFrameLoading,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --enable-automation --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --disable-web-security --disable-features=IsolateOrigins,site-per-process,ImprovedCookieControls --disable-site-isolation-trials --user-data-dir=/var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25 --remote-debugging-pipe about:blank\n  - <launched> pid=411842\n  - [pid=411842][err] [0704/002617.863201:WARNING:chrome/app/chrome_main_linux.cc:84] Read channel stable from /opt/google/chrome/CHROME_VERSION_EXTRA\n  - [pid=411842][err] [411842:411842:0704/002617.954624:ERROR:chrome/browser/process_singleton_posix.cc:347] Failed to create /var/lib/app/browser-profiles/d5ad8308-55df-4e97-b283-14737089fe25/SingletonLock: File exists (17)\n  - [pid=411842][err] [411842:411842:0704/002617.955047:ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory. This means that running multiple instances would start multiple browser processes rather than opening a new window in the existing process. Aborting now to avoid profile corruption.\n",
+            "target": null,
+            "route": null,
+            "success": null,
+            "payload": {},
+            "created_at": "2026-07-04T00:26:17.973063+07:00"
+        }
+    ]
+}
