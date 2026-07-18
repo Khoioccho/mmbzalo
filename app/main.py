@@ -18,11 +18,13 @@ from sqlalchemy.orm import Session
 from app.api_models import (
     AuthSessionResult,
     CancelJobResult,
+    CreateWorkspaceRequest,
     JobListResult,
     JobResult,
     JobSubmissionResult,
     LoginRequest,
     ReadinessResult,
+    RegisterRequest,
     WorkspaceSessionResult,
     WorkspaceSummary,
     WorkspaceSwitchResult,
@@ -53,6 +55,7 @@ from app.services import (
     create_auth_session,
     create_campaign,
     create_job,
+    create_workspace_for_user,
     ensure_workspace_session,
     get_campaign,
     get_campaign_progress,
@@ -66,12 +69,14 @@ from app.services import (
     list_jobs,
     list_sync_runs,
     record_audit_log,
+    register_user_with_workspace,
     resolve_auth_session,
     revoke_auth_session,
     switch_active_workspace,
     update_workspace_login_status,
     update_workspace_settings,
 )
+from app.rate_limit import rate_limiter
 from app.zalo_driver import get_driver, shutdown_all_drivers
 
 
@@ -85,6 +90,34 @@ settings = get_settings()
 
 def _cookie_value(request: Request) -> str | None:
     return request.cookies.get(settings.session_cookie_name)
+
+
+def _client_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or "unknown"
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip() or "unknown"
+    return request.client.host if request.client and request.client.host else "unknown"
+
+
+def _enforce_rate_limit(request: Request, action: str, limit: int) -> None:
+    if not rate_limiter.allow(action=action, key=_client_key(request), limit=limit):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many attempts. Try again later.")
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        domain=settings.cookie_domain,
+        max_age=settings.session_ttl_hours * 3600,
+        path="/",
+    )
 
 
 def _driver_settings_provider(workspace_id: UUID):
@@ -148,6 +181,7 @@ async def readiness(db: Session = Depends(get_db)):
 
 @app.post("/api/auth/login", response_model=AuthSessionResult)
 async def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    _enforce_rate_limit(request, "auth.login", settings.login_rate_limit_per_hour)
     user = authenticate_user(db, payload.email, payload.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
@@ -158,19 +192,43 @@ async def login(payload: LoginRequest, request: Request, response: Response, db:
         user_agent=request.headers.get("user-agent"),
     )
     result = build_auth_session_result(db, auth_session, user)
-    response.set_cookie(
-        key=settings.session_cookie_name,
-        value=token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,
-        domain=settings.cookie_domain,
-        max_age=settings.session_ttl_hours * 3600,
-        path="/",
-    )
+    _set_session_cookie(response, token)
     record_audit_log(
         db,
         action="auth.login",
+        entity_type="user",
+        entity_id=str(user.id),
+        actor_type=AuditActorType.USER,
+        actor_user_id=user.id,
+        metadata={"email": user.email},
+    )
+    return result
+
+
+@app.post("/api/auth/register", response_model=AuthSessionResult)
+async def register(payload: RegisterRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    if not settings.registration_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Registration is currently disabled.")
+    _enforce_rate_limit(request, "auth.register", settings.registration_rate_limit_per_hour)
+    try:
+        token, auth_session, user = register_user_with_workspace(
+            db,
+            email=payload.email,
+            password=payload.password,
+            display_name=payload.display_name,
+            workspace_name=payload.workspace_name,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    result = build_auth_session_result(db, auth_session, user)
+    _set_session_cookie(response, token)
+    record_audit_log(
+        db,
+        workspace_id=auth_session.active_workspace_id,
+        action="auth.register",
         entity_type="user",
         entity_id=str(user.id),
         actor_type=AuditActorType.USER,
@@ -214,6 +272,29 @@ async def workspace_list(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
     auth_session, user = resolved
     return build_auth_session_result(db, auth_session, user).workspaces
+
+
+@app.post("/api/workspaces", response_model=WorkspaceSwitchResult)
+async def workspace_create(payload: CreateWorkspaceRequest, request: Request, db: Session = Depends(get_db)):
+    resolved = resolve_auth_session(db, _cookie_value(request))
+    if not resolved:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    auth_session, user = resolved
+    try:
+        result = create_workspace_for_user(db, user=user, auth_session=auth_session, name=payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    record_audit_log(
+        db,
+        workspace_id=result.active_workspace_id,
+        action="workspace.create",
+        entity_type="workspace",
+        entity_id=str(result.active_workspace_id),
+        actor_type=AuditActorType.USER,
+        actor_user_id=user.id,
+        metadata={"name": result.workspace.name},
+    )
+    return result
 
 
 @app.post("/api/workspaces/{workspace_id}/switch", response_model=WorkspaceSwitchResult)

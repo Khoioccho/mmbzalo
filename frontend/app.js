@@ -19,6 +19,7 @@
       workspaces: [],
       activeWorkspaceId: null,
     },
+    authMode: "login",
     loginPollInterval: null,
     campaignProgressPollInterval: null,
     campaignProgressSeen: new Set(),
@@ -94,6 +95,24 @@
     } else {
       el.dataset.state = stateName;
     }
+  }
+
+  function setAuthMode(mode) {
+    state.authMode = mode;
+    const isRegister = mode === "register";
+    $("#auth-register-fields").style.display = isRegister ? "flex" : "none";
+    $("#btn-auth-login").style.display = isRegister ? "none" : "inline-flex";
+    $("#btn-auth-register").style.display = isRegister ? "inline-flex" : "none";
+    $("#auth-password").autocomplete = isRegister ? "new-password" : "current-password";
+    $$(".auth-mode__btn").forEach((btn) => {
+      btn.classList.toggle("auth-mode__btn--active", btn.dataset.authMode === mode);
+    });
+    setAuthMessage(
+      isRegister
+        ? "Create an account and a private workspace for your Zalo session."
+        : "Sign in to unlock workspace data and automation actions.",
+      "neutral"
+    );
   }
 
   function getActiveWorkspace() {
@@ -274,6 +293,7 @@
     $("#dashboard-session-meta").textContent = "";
     $("#auth-form-panel").style.display = "block";
     $("#auth-summary-panel").style.display = "none";
+    setAuthMode(state.authMode || "login");
     setAuthMessage(message, silent ? "neutral" : "error");
     $("#login-info").style.display = "none";
     $("#login-name").textContent = "";
@@ -305,6 +325,7 @@
 
     $("#auth-form-panel").style.display = "none";
     $("#auth-summary-panel").style.display = "block";
+    $("#new-workspace-name").value = "";
     $("#btn-auth-logout").style.display = "inline-flex";
     $("#dashboard-session").style.display = "flex";
     $("#header-workspace").style.display = "flex";
@@ -1169,6 +1190,12 @@
   }
 
   function bindAuth() {
+    $$(".auth-mode__btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        setAuthMode(btn.dataset.authMode || "login");
+      });
+    });
+
     $("#btn-auth-login").addEventListener("click", async () => {
       const email = $("#auth-email").value.trim();
       const password = $("#auth-password").value;
@@ -1200,11 +1227,71 @@
       }
     });
 
+    $("#btn-auth-register").addEventListener("click", async () => {
+      const email = $("#auth-email").value.trim();
+      const password = $("#auth-password").value;
+      const displayName = $("#auth-display-name").value.trim();
+      const workspaceName = $("#auth-workspace-name").value.trim();
+      if (!email) {
+        setAuthMessage("Email is required.", "error");
+        return;
+      }
+      if (!password) {
+        setAuthMessage("Password is required.", "error");
+        return;
+      }
+      if (!displayName) {
+        setAuthMessage("Display name is required.", "error");
+        return;
+      }
+      if (!workspaceName) {
+        setAuthMessage("Workspace name is required.", "error");
+        return;
+      }
+      const btn = $("#btn-auth-register");
+      btn.disabled = true;
+      btn.textContent = "Creating...";
+      try {
+        const session = await apiRequest("/api/auth/register", {
+          method: "POST",
+          body: {
+            email,
+            password,
+            display_name: displayName,
+            workspace_name: workspaceName,
+          },
+        });
+        applyAuthSession(session, "success");
+        const workspace = getActiveWorkspace();
+        log(`Registered ${session.user.email}${workspace ? ` with workspace '${workspace.name}'` : ""}.`, "success");
+        await hydrateWorkspace();
+      } catch (err) {
+        setAuthMessage(err.message, "error");
+        log(`Registration error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Sign Up";
+      }
+    });
+
     $("#auth-password").addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
-        $("#btn-auth-login").click();
+        if (state.authMode === "register") {
+          $("#btn-auth-register").click();
+        } else {
+          $("#btn-auth-login").click();
+        }
       }
+    });
+
+    ["auth-display-name", "auth-workspace-name"].forEach((id) => {
+      $(`#${id}`).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          $("#btn-auth-register").click();
+        }
+      });
     });
 
     $("#btn-auth-logout").addEventListener("click", async () => {
@@ -1215,6 +1302,52 @@
       }
       handleSignedOut("Signed out. Sign in to continue.", true);
       log("Signed out.", "success");
+    });
+
+    $("#btn-create-workspace").addEventListener("click", async () => {
+      const name = $("#new-workspace-name").value.trim();
+      if (!name) {
+        setAuthMessage("Workspace name is required.", "error");
+        return;
+      }
+      const btn = $("#btn-create-workspace");
+      btn.disabled = true;
+      btn.textContent = "Creating...";
+      try {
+        const result = await apiRequest("/api/workspaces", {
+          method: "POST",
+          body: { name },
+        });
+        state.auth.activeWorkspaceId = result.active_workspace_id;
+        const existingIndex = state.auth.workspaces.findIndex((workspace) => workspace.workspace_id === result.workspace.workspace_id);
+        if (existingIndex >= 0) {
+          state.auth.workspaces[existingIndex] = result.workspace;
+        } else {
+          state.auth.workspaces.push(result.workspace);
+        }
+        applyAuthSession({
+          user: state.auth.user,
+          active_workspace_id: result.active_workspace_id,
+          workspaces: state.auth.workspaces,
+        }, "success");
+        $("#new-workspace-name").value = "";
+        setAuthMessage(`Created workspace '${result.workspace.name}'.`, "success");
+        log(`Created workspace '${result.workspace.name}'.`, "success");
+        await hydrateWorkspace();
+      } catch (err) {
+        setAuthMessage(err.message, "error");
+        log(`Workspace create error: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Create";
+      }
+    });
+
+    $("#new-workspace-name").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        $("#btn-create-workspace").click();
+      }
     });
 
     $("#workspace-select").addEventListener("change", async (event) => {

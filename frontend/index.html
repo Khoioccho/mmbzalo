@@ -87,6 +87,10 @@
               <div class="card__body">
                 <div class="auth-panel" id="auth-panel">
                   <div class="auth-panel__form" id="auth-form-panel">
+                    <div class="auth-mode" role="tablist" aria-label="Account access mode">
+                      <button class="auth-mode__btn auth-mode__btn--active" id="auth-mode-login" type="button" data-auth-mode="login">Sign In</button>
+                      <button class="auth-mode__btn" id="auth-mode-register" type="button" data-auth-mode="register">Sign Up</button>
+                    </div>
                     <div class="field-row auth-panel__row">
                       <div class="field-group">
                         <label class="field-label" for="auth-email">Email</label>
@@ -97,9 +101,22 @@
                         <input type="password" id="auth-password" class="field-input" placeholder="Enter your password" autocomplete="current-password" />
                       </div>
                     </div>
+                    <div class="field-row auth-panel__row auth-register-fields" id="auth-register-fields" style="display:none;">
+                      <div class="field-group">
+                        <label class="field-label" for="auth-display-name">Display Name</label>
+                        <input type="text" id="auth-display-name" class="field-input" placeholder="Your name" autocomplete="name" />
+                      </div>
+                      <div class="field-group">
+                        <label class="field-label" for="auth-workspace-name">Workspace Name</label>
+                        <input type="text" id="auth-workspace-name" class="field-input" placeholder="My Workspace" autocomplete="organization" />
+                      </div>
+                    </div>
                     <div class="actions">
                       <button class="btn btn--primary" id="btn-auth-login" type="button">
                         Sign In
+                      </button>
+                      <button class="btn btn--primary" id="btn-auth-register" type="button" style="display:none;">
+                        Sign Up
                       </button>
                     </div>
                     <div class="auth-panel__message" id="auth-message">Sign in to unlock workspace data and automation actions.</div>
@@ -116,6 +133,13 @@
                     <div class="auth-summary__row">
                       <span class="auth-summary__label">Workspace Role</span>
                       <span class="auth-summary__value" id="auth-summary-role">-</span>
+                    </div>
+                    <div class="workspace-create">
+                      <label class="field-label" for="new-workspace-name">New Workspace</label>
+                      <div class="workspace-create__row">
+                        <input type="text" id="new-workspace-name" class="field-input" placeholder="Workspace name" />
+                        <button class="btn btn--secondary btn--sm" id="btn-create-workspace" type="button">Create</button>
+                      </div>
                     </div>
                   </div>
                 </div>

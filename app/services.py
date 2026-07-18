@@ -93,6 +93,27 @@ def slugify(value: str) -> str:
     return slug or f"workspace-{uuid.uuid4().hex[:8]}"
 
 
+def unique_workspace_slug(db: Session, name: str) -> str:
+    base_slug = slugify(name)
+    slug = base_slug
+    suffix = 2
+    while db.scalar(select(Workspace.id).where(Workspace.slug == slug)):
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    return slug
+
+
+def normalize_email(value: str) -> str:
+    return value.strip().lower()
+
+
+def validate_password_strength(password: str) -> None:
+    if len(password) < 10:
+        raise ValueError("Password must be at least 10 characters.")
+    if not any(char.isalpha() for char in password) or not any(char.isdigit() for char in password):
+        raise ValueError("Password must include both letters and numbers.")
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -287,6 +308,83 @@ def create_auth_session(db: Session, user: User, *, ip_address: str | None, user
     db.add(session_row)
     db.flush()
     return token, session_row
+
+
+def register_user_with_workspace(
+    db: Session,
+    *,
+    email: str,
+    password: str,
+    display_name: str,
+    workspace_name: str,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> tuple[str, AuthSession, User]:
+    normalized_email = normalize_email(email)
+    normalized_display_name = display_name.strip()
+    normalized_workspace_name = workspace_name.strip()
+    if not normalized_email or "@" not in normalized_email or "." not in normalized_email.rsplit("@", 1)[-1]:
+        raise ValueError("Enter a valid email address.")
+    if not normalized_display_name:
+        raise ValueError("Display name is required.")
+    if not normalized_workspace_name:
+        raise ValueError("Workspace name is required.")
+    validate_password_strength(password)
+    existing = db.scalar(select(User.id).where(func.lower(User.email) == normalized_email))
+    if existing:
+        raise ValueError("Registration could not be completed.")
+
+    user = User(
+        email=normalized_email,
+        password_hash=hash_password(password),
+        display_name=normalized_display_name,
+        is_platform_admin=False,
+    )
+    db.add(user)
+    db.flush()
+
+    workspace = Workspace(
+        slug=unique_workspace_slug(db, normalized_workspace_name),
+        name=normalized_workspace_name,
+        is_active=True,
+        created_by_id=user.id,
+    )
+    db.add(workspace)
+    db.flush()
+    db.add(WorkspaceMembership(workspace_id=workspace.id, user_id=user.id, role=MembershipRole.ADMIN))
+    ensure_workspace_settings(db, workspace.id)
+    ensure_workspace_session(db, workspace.id)
+    token, auth_session = create_auth_session(db, user, ip_address=ip_address, user_agent=user_agent)
+    auth_session.active_workspace_id = workspace.id
+    db.flush()
+    return token, auth_session, user
+
+
+def create_workspace_for_user(
+    db: Session,
+    *,
+    user: User,
+    auth_session: AuthSession,
+    name: str,
+) -> WorkspaceSwitchResult:
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValueError("Workspace name is required.")
+    workspace = Workspace(
+        slug=unique_workspace_slug(db, normalized_name),
+        name=normalized_name,
+        is_active=True,
+        created_by_id=user.id,
+    )
+    db.add(workspace)
+    db.flush()
+    membership = WorkspaceMembership(workspace_id=workspace.id, user_id=user.id, role=MembershipRole.ADMIN)
+    db.add(membership)
+    ensure_workspace_settings(db, workspace.id)
+    ensure_workspace_session(db, workspace.id)
+    auth_session.active_workspace_id = workspace.id
+    db.flush()
+    return WorkspaceSwitchResult(active_workspace_id=workspace.id, workspace=_serialize_workspace_membership(db, membership))
 
 
 def authenticate_user(db: Session, email: str, password: str) -> User | None:
@@ -760,7 +858,7 @@ def bootstrap_admin(
     db.add(user)
     db.flush()
     workspace = Workspace(
-        slug=workspace_slug or slugify(workspace_name),
+        slug=workspace_slug or unique_workspace_slug(db, workspace_name),
         name=workspace_name.strip(),
         is_active=True,
         created_by_id=user.id,

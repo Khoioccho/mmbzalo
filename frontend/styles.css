@@ -169,6 +169,29 @@ code,pre { font-family: var(--font-mono); }
   border:1px solid var(--border-subtle);
   background:rgba(0,0,0,0.16);
 }
+.auth-mode {
+  display:inline-flex;
+  width:max-content;
+  padding:3px;
+  border:1px solid var(--border-subtle);
+  border-radius:var(--radius-sm);
+  background:rgba(255,255,255,0.04);
+}
+.auth-mode__btn {
+  border:0;
+  padding:7px 14px;
+  border-radius:calc(var(--radius-sm) - 2px);
+  background:transparent;
+  color:var(--text-secondary);
+  font-family:var(--font-sans);
+  font-size:0.78rem;
+  font-weight:700;
+  cursor:pointer;
+}
+.auth-mode__btn--active {
+  color:#fff;
+  background:var(--accent);
+}
 .auth-panel__row {
   margin-top:0;
 }
@@ -202,6 +225,19 @@ code,pre { font-family: var(--font-mono); }
   font-weight:700;
   color:var(--text-primary);
   text-align:right;
+}
+.workspace-create {
+  margin-top:12px;
+  padding-top:12px;
+  border-top:1px solid rgba(255,255,255,0.06);
+}
+.workspace-create__row {
+  display:flex;
+  gap:8px;
+  margin-top:6px;
+}
+.workspace-create__row .field-input {
+  min-width:0;
 }
 .login-divider {
   margin:18px 0 16px;

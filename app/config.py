@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_domain: str | None = None
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    registration_enabled: bool = True
+    registration_rate_limit_per_hour: int = 10
+    login_rate_limit_per_hour: int = 20
 
     cors_allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:8000"])
 

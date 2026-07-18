@@ -28,6 +28,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    display_name: str
+    workspace_name: str
+
+
+class CreateWorkspaceRequest(BaseModel):
+    name: str
+
+
 class WorkspaceSummary(BaseModel):
     workspace_id: UUID
     slug: str
