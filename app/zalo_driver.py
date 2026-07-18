@@ -15,15 +15,16 @@ Full feature set:
 """
 
 import asyncio
-import functools
 import logging
 import os
+import queue
 import random
 import re
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
@@ -122,14 +123,54 @@ CONVERSATION_VIEW_MARKERS = [
     '[class*="ConversationList"]',
 ]
 
-# Single-thread executor — all Playwright calls run here
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
+# Single owner thread: sync Playwright objects never enter FastAPI's event loop.
+class _PlaywrightThread:
+    """Own all sync Playwright objects on one thread without an asyncio loop."""
+
+    def __init__(self) -> None:
+        self._tasks: queue.Queue[tuple[Future, Callable, tuple, dict]] = queue.Queue()
+        self._start_lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+
+    def submit(self, fn: Callable, *args, **kwargs) -> Future:
+        self._ensure_started()
+        future: Future = Future()
+        self._tasks.put((future, fn, args, kwargs))
+        return future
+
+    def _ensure_started(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        with self._start_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run,
+                name="playwright-owner",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _run(self) -> None:
+        # Playwright's sync API rejects threads with a running asyncio loop.
+        asyncio.set_event_loop(None)
+        logger.info("Playwright owner thread started.")
+        while True:
+            future, fn, args, kwargs = self._tasks.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:
+                future.set_exception(exc)
 
 
-def _run_in_thread(fn, *args, **kwargs):
-    """Schedule a sync function to run in the Playwright thread."""
-    loop = asyncio.get_event_loop()
-    return loop.run_in_executor(_executor, functools.partial(fn, *args, **kwargs))
+_playwright_thread = _PlaywrightThread()
+
+
+async def _run_in_thread(fn: Callable, *args, **kwargs) -> Any:
+    """Run a sync driver operation on the dedicated Playwright owner thread."""
+    return await asyncio.wrap_future(_playwright_thread.submit(fn, *args, **kwargs))
 
 
 class ZaloDriver:
@@ -175,12 +216,13 @@ class ZaloDriver:
 
     def _ensure_pw(self):
         if not self._pw:
-            import sys
-            import asyncio
-            if sys.platform == "win32":
-                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-                logger.info("Set WindowsProactorEventLoopPolicy for Playwright thread.")
-            
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("Sync Playwright initialization escaped its dedicated owner thread.")
+
             self._pw = sync_playwright().start()
             logger.info("Playwright started (sync_api, threaded).")
 
