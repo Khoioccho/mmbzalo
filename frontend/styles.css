@@ -386,6 +386,19 @@ code,pre { font-family: var(--font-mono); }
 .login-state-detail {
   font-size:0.8rem; color:var(--text-secondary); margin-top:4px;
 }
+.login-qr {
+  width:min(100%, 340px); margin-top:20px; padding:16px;
+  border-radius:var(--radius-md); background:#fff; color:#172033;
+  box-shadow:0 18px 45px rgba(0,0,0,0.28);
+}
+.login-qr img {
+  display:block; width:100%; max-width:280px; aspect-ratio:1;
+  object-fit:contain; margin:0 auto; border-radius:8px;
+}
+.login-qr p {
+  margin:12px auto 0; max-width:280px; font-size:0.76rem; line-height:1.45;
+  color:#4b5563;
+}
 
 /* ─── Settings ───────────────────────────────────────────────── */
 .settings-body { padding-top:12px; }

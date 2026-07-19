@@ -47,6 +47,7 @@ class LoginStatus(BaseModel):
     profile_avatar: Optional[str] = None
     phone_number: Optional[str] = None
     message: str = ""
+    qr_image_base64: Optional[str] = None
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 

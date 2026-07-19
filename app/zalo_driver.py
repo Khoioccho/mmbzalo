@@ -15,6 +15,7 @@ Full feature set:
 """
 
 import asyncio
+import base64
 import logging
 import os
 import queue
@@ -28,6 +29,7 @@ from typing import Any, Callable, Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
+from app.browser_lease import BrowserProfileInUseError, BrowserProfileLease
 from app.config import Settings
 from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
 from app.models import (
@@ -44,6 +46,17 @@ from app.proxy_config import parse_proxy_settings
 logger = logging.getLogger("zalo_driver")
 
 ZALO_CHAT_URL = "https://chat.zalo.me/"
+PROFILE_LOCK_RETRY_SECONDS = 2
+PROFILE_LOCK_TIMEOUT_SECONDS = 20
+QR_SELECTORS = [
+    '[data-testid*="qr" i]',
+    '[class*="qrcode" i]',
+    '[class*="qr-code" i]',
+    '[class*="qr_code" i]',
+    '[class*="qr" i] canvas',
+    '[class*="qr" i] img',
+    'canvas[width][height]',
+]
 SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SEND_DEBUG_ENABLED = (
     os.getenv("ZALO_SEND_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -189,6 +202,7 @@ class ZaloDriver:
         self._pw: Optional[Playwright] = None
         self._login_context: Optional[BrowserContext] = None
         self._login_page: Optional[Page] = None
+        self._login_lease: Optional[BrowserProfileLease] = None
         self._login_state: LoginState = LoginState.IDLE
         self._profile_name: Optional[str] = None
         self._profile_avatar: Optional[str] = None
@@ -301,6 +315,9 @@ class ZaloDriver:
             except Exception:
                 pass
             self._login_context = None
+        if self._login_lease:
+            self._login_lease.release()
+            self._login_lease = None
 
     def _close_worker_sync(self):
         if self._worker_browser:
@@ -319,31 +336,40 @@ class ZaloDriver:
         self._close_login_sync()
 
         self.profile_path.mkdir(parents=True, exist_ok=True)
-        proxy = self._get_launch_proxy_config()
-        logger.info(
-            "Launching login browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+        self._login_lease = BrowserProfileLease.acquire(
+            self._deployment_settings.browser_profiles_root,
             self.workspace_key,
-            self._deployment_settings.host_identity,
-            self._deployment_settings.login_display,
-            self.profile_path,
-            proxy.get("server") if proxy else None,
+            "login_browser",
         )
-
+        proxy = None
         try:
+            proxy = self._get_launch_proxy_config()
+            logger.info(
+                "Launching login browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+                self.workspace_key,
+                self._deployment_settings.host_identity,
+                self._deployment_settings.login_display,
+                self.profile_path,
+                proxy.get("server") if proxy else None,
+            )
             self._login_context = self._pw.chromium.launch_persistent_context(
                 **self._persistent_context_kwargs(proxy=proxy, viewport={"width": 1280, "height": 800}),
             )
+            self._login_page = (
+                self._login_context.pages[0]
+                if self._login_context.pages
+                else self._login_context.new_page()
+            )
+            self._login_page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=30_000)
         except Exception as exc:
             if proxy:
                 logger.error(f"Login browser launch failed with proxy {proxy.get('server')}: {exc}")
+            self._close_login_sync()
+            if self._is_profile_lock_error(exc):
+                raise BrowserProfileInUseError(
+                    "Workspace browser profile is currently in use. Close the existing browser and retry Zalo login."
+                ) from exc
             raise
-
-        self._login_page = (
-            self._login_context.pages[0]
-            if self._login_context.pages
-            else self._login_context.new_page()
-        )
-        self._login_page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=30_000)
 
         self._login_state = LoginState.WAITING_QR
         self._profile_name = None
@@ -361,6 +387,7 @@ class ZaloDriver:
 
         if not self._login_page or self._login_page.is_closed():
             self._login_state = LoginState.IDLE
+            self._close_login_sync()
             return self._status_dict("No login browser is open.")
 
         try:
@@ -369,14 +396,18 @@ class ZaloDriver:
                 self._login_state = LoginState.AUTHENTICATED
                 self._extract_profile(self._login_page)
                 logger.info(f"Login successful — profile: {self._profile_name}")
-                return self._status_dict("Authenticated successfully!")
+                result = self._status_dict("Authenticated successfully. The login browser was closed safely.")
+                self._close_login_sync()
+                return result
             else:
                 self._login_state = LoginState.WAITING_QR
                 return self._status_dict("Waiting for QR scan or phone login...")
         except Exception as e:
             logger.warning(f"Login check error: {e}")
             self._login_state = LoginState.ERROR
-            return self._status_dict(f"Error: {e}")
+            result = self._status_dict(f"Error: {e}")
+            self._close_login_sync()
+            return result
 
     async def check_login_status(self) -> dict:
         return await _run_in_thread(self._check_login_sync)
@@ -392,6 +423,42 @@ class ZaloDriver:
     async def stop_login(self) -> dict:
         return await _run_in_thread(self._stop_login_sync)
 
+    def _is_login_browser_active_sync(self) -> bool:
+        return bool(
+            self._login_context
+            and self._login_page
+            and not self._login_page.is_closed()
+        )
+
+    async def is_login_browser_active(self) -> bool:
+        return await _run_in_thread(self._is_login_browser_active_sync)
+
+    def _capture_login_qr_sync(self) -> Optional[str]:
+        if not self._login_page or self._login_page.is_closed():
+            return None
+
+        for selector in QR_SELECTORS:
+            try:
+                matches = self._login_page.locator(selector)
+                for index in range(min(matches.count(), 8)):
+                    candidate = matches.nth(index)
+                    if not candidate.is_visible():
+                        continue
+                    box = candidate.bounding_box()
+                    if not box:
+                        continue
+                    width = float(box.get("width", 0))
+                    height = float(box.get("height", 0))
+                    if min(width, height) < 120 or max(width, height) > 600:
+                        continue
+                    if max(width, height) / max(min(width, height), 1) > 1.35:
+                        continue
+                    png = candidate.screenshot(type="png")
+                    return f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+            except Exception as exc:
+                logger.debug("QR capture selector failed selector=%s error=%s", selector, exc)
+        return None
+
     def _status_dict(self, message: str) -> dict:
         return {
             "state": self._login_state.value,
@@ -399,17 +466,47 @@ class ZaloDriver:
             "profile_avatar": self._profile_avatar,
             "phone_number": None,
             "message": message,
+            "qr_image_base64": (
+                self._capture_login_qr_sync()
+                if self._login_state == LoginState.WAITING_QR
+                else None
+            ),
         }
 
     # ═══════════════════════════════════════════════════════════
     #  WORKER (headless)
     # ═══════════════════════════════════════════════════════════
 
-    def _get_worker_context(self) -> BrowserContext:
+    @staticmethod
+    def _is_profile_lock_error(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "singletonlock",
+                "processsingleton",
+                "profile is already in use",
+                "user data directory is already in use",
+                "browser profile is currently in use",
+            )
+        )
+
+    def _get_worker_context(self, owner_type: str) -> tuple[BrowserContext, BrowserProfileLease]:
         self._ensure_pw()
 
         if self.profile_path.exists():
-            proxy = self._get_launch_proxy_config()
+            lease = BrowserProfileLease.acquire(
+                self._deployment_settings.browser_profiles_root,
+                self.workspace_key,
+                owner_type,
+                timeout_seconds=PROFILE_LOCK_TIMEOUT_SECONDS,
+                retry_seconds=PROFILE_LOCK_RETRY_SECONDS,
+            )
+            try:
+                proxy = self._get_launch_proxy_config()
+            except Exception:
+                lease.release()
+                raise
             logger.info(
                 "Launching worker browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
                 self.workspace_key,
@@ -418,36 +515,66 @@ class ZaloDriver:
                 self.profile_path,
                 proxy.get("server") if proxy else None,
             )
-            try:
-                return self._pw.chromium.launch_persistent_context(
-                    **self._persistent_context_kwargs(proxy=proxy, viewport={"width": 1440, "height": 900}),
-                )
-            except Exception as exc:
-                if proxy:
-                    logger.error(f"Worker browser launch failed with proxy {proxy.get('server')}: {exc}")
-                raise
+            deadline = time.monotonic() + PROFILE_LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    context = self._pw.chromium.launch_persistent_context(
+                        **self._persistent_context_kwargs(proxy=proxy, viewport={"width": 1440, "height": 900}),
+                    )
+                    return context, lease
+                except Exception as exc:
+                    if not self._is_profile_lock_error(exc):
+                        lease.release()
+                        if proxy:
+                            logger.error(f"Worker browser launch failed with proxy {proxy.get('server')}: {exc}")
+                        raise
+                    if time.monotonic() >= deadline:
+                        lease.release()
+                        raise BrowserProfileInUseError(
+                            "Workspace browser profile is currently in use. "
+                            "Close the login browser and retry the operation."
+                        ) from exc
+                    logger.info(
+                        "Workspace profile lock still active workspace=%s owner=%s; retrying in %ss.",
+                        self.workspace_key,
+                        owner_type,
+                        PROFILE_LOCK_RETRY_SECONDS,
+                    )
+                    time.sleep(PROFILE_LOCK_RETRY_SECONDS)
 
         raise RuntimeError("No session profile available. Please log in first.")
 
-    def _worker_page(self) -> tuple:
-        """Returns (context, page) with an authenticated Zalo session."""
+    def _worker_page(self, owner_type: str) -> tuple[BrowserContext, Page, BrowserProfileLease]:
+        """Return an authenticated page while holding exclusive profile ownership."""
         if self._login_context and self._login_page and not self._login_page.is_closed():
-            self._wait_for_shell_ready(self._login_page)
             if self._detect_auth(self._login_page):
-                logger.info("Reusing authenticated login browser for worker actions.")
-                return self._login_context, self._login_page
+                self._login_state = LoginState.AUTHENTICATED
+                self._extract_profile(self._login_page)
+                self._close_login_sync()
+            else:
+                raise BrowserProfileInUseError(
+                    "Zalo login is still waiting for a QR scan. Finish or stop login before running automation."
+                )
 
-        context = self._get_worker_context()
+        context, lease = self._get_worker_context(owner_type)
         page = context.pages[0] if hasattr(context, "pages") and context.pages else context.new_page()
-        page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=60_000)
+        try:
+            page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=60_000)
+            self._wait_for_shell_ready(page)
+            if not self._detect_auth(page):
+                raise RuntimeError("Session expired or invalid. Please log in again.")
+        except Exception:
+            self._close_worker_context(context, lease)
+            raise
 
-        self._wait_for_shell_ready(page)
+        return context, page, lease
 
-        if not self._detect_auth(page):
+    @staticmethod
+    def _close_worker_context(context: BrowserContext, lease: BrowserProfileLease) -> None:
+        try:
             context.close()
-            raise RuntimeError("Session expired or invalid. Please log in again.")
-
-        return context, page
+        finally:
+            lease.release()
 
     def _wait_for_shell_ready(self, page: Page, timeout_ms: int = 45_000):
         """Wait until the Zalo shell has rendered enough UI for navigation."""
@@ -833,8 +960,7 @@ class ZaloDriver:
 
     def _sync_contacts_sync(self) -> dict:
         diagnostics = ContactSyncDiagnostics()
-        context, page = self._worker_page()
-        owns_context = context is not self._login_context
+        context, page, lease = self._worker_page("contact_sync_worker")
         try:
             diagnostics.login_detected = self._detect_auth(page)
 
@@ -1063,8 +1189,7 @@ class ZaloDriver:
                 "message": message,
             }
         finally:
-            if owns_context:
-                context.close()
+            self._close_worker_context(context, lease)
 
     async def sync_contacts(self) -> dict:
         return await _run_in_thread(self._sync_contacts_sync)
@@ -1478,7 +1603,7 @@ class ZaloDriver:
         return False, "direct_thread_unavailable"
 
     def _send_messages_sync(self, targets, message, delay_min, delay_max) -> dict:
-        context, page = self._worker_page()
+        context, page, lease = self._worker_page("manual_send_worker")
         results = []
         try:
             for i, target in enumerate(targets):
@@ -1508,13 +1633,13 @@ class ZaloDriver:
             return {"total": len(targets), "sent": sent, "failed": failed,
                     "results": results, "message": f"Sent {sent}/{len(targets)} ({failed} failed)."}
         finally:
-            context.close()
+            self._close_worker_context(context, lease)
 
     async def send_messages(self, targets, message, delay_min=15.0, delay_max=30.0) -> dict:
         return await _run_in_thread(self._send_messages_sync, targets, message, delay_min, delay_max)
 
     def _send_campaign_messages_sync(self, contacts, message, delay_min, delay_max, progress_callback: Optional[Callable[[dict], None]] = None) -> dict:
-        context, page = self._worker_page()
+        context, page, lease = self._worker_page("campaign_worker")
         results = []
         route_stats = {"direct_thread": 0, "search_fallback": 0, "not_found": 0}
         started_at = time.monotonic()
@@ -1720,7 +1845,7 @@ class ZaloDriver:
                 "message": message_summary,
             }
         finally:
-            context.close()
+            self._close_worker_context(context, lease)
 
     async def send_campaign_messages(self, contacts, message, delay_min=15.0, delay_max=30.0, progress_callback: Optional[Callable[[dict], None]] = None) -> dict:
         return await _run_in_thread(self._send_campaign_messages_sync, contacts, message, delay_min, delay_max, progress_callback)
@@ -1730,7 +1855,7 @@ class ZaloDriver:
     # ═══════════════════════════════════════════════════════════
 
     def _send_friend_requests_sync(self, phone_numbers, greeting_message) -> dict:
-        context, page = self._worker_page()
+        context, page, lease = self._worker_page("friend_request_worker")
         results = []
         try:
             for i, phone in enumerate(phone_numbers):
@@ -1794,7 +1919,7 @@ class ZaloDriver:
             return {"total": len(phone_numbers), "sent": sent, "failed": failed,
                     "results": results, "message": f"Sent {sent}/{len(phone_numbers)} ({failed} failed)."}
         finally:
-            context.close()
+            self._close_worker_context(context, lease)
 
     async def send_friend_requests(self, phone_numbers, greeting_message=None) -> dict:
         return await _run_in_thread(self._send_friend_requests_sync, phone_numbers, greeting_message)
@@ -1804,7 +1929,7 @@ class ZaloDriver:
     # ═══════════════════════════════════════════════════════════
 
     def _send_group_message_sync(self, group_name, message) -> dict:
-        context, page = self._worker_page()
+        context, page, lease = self._worker_page("group_send_worker")
         try:
             if not self._open_search(page):
                 raise RuntimeError("Could not open search bar.")
@@ -1822,7 +1947,7 @@ class ZaloDriver:
             logger.warning(f"Group message failed: {e}")
             return {"success": False, "group_name": group_name, "message": str(e)}
         finally:
-            context.close()
+            self._close_worker_context(context, lease)
 
     async def send_group_message(self, group_name, message) -> dict:
         return await _run_in_thread(self._send_group_message_sync, group_name, message)

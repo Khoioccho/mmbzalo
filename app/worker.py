@@ -5,6 +5,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from app.browser_lease import BrowserProfileInUseError
 from app.config import get_settings
 from app.database import session_scope
 from app.db_models import AutomationJob, CampaignStatus, Contact, JobFailureClass, JobStatus, JobType, WorkspaceLoginState
@@ -42,6 +43,14 @@ def _normalize(value: Any) -> Any:
     return value
 
 
+def _job_failure_class(exc: Exception) -> JobFailureClass:
+    if isinstance(exc, BrowserProfileInUseError):
+        return JobFailureClass.TRANSIENT
+    if "session expired" in str(exc).lower():
+        return JobFailureClass.SESSION_EXPIRED
+    return JobFailureClass.PERMANENT
+
+
 def _settings_provider(workspace_id: UUID):
     def provider():
         with session_scope() as db:
@@ -75,7 +84,7 @@ async def _process_contact_sync(job_id: UUID) -> None:
         result = _normalize(await driver.sync_contacts())
     except Exception as exc:
         message = str(exc)
-        failure_class = JobFailureClass.SESSION_EXPIRED if "session expired" in message.lower() else JobFailureClass.PERMANENT
+        failure_class = _job_failure_class(exc)
         with session_scope() as db:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
@@ -106,7 +115,7 @@ async def _process_manual_send(job_id: UUID) -> None:
         )
     except Exception as exc:
         message = str(exc)
-        failure_class = JobFailureClass.SESSION_EXPIRED if "session expired" in message.lower() else JobFailureClass.PERMANENT
+        failure_class = _job_failure_class(exc)
         with session_scope() as db:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
@@ -134,7 +143,7 @@ async def _process_friend_request(job_id: UUID) -> None:
         )
     except Exception as exc:
         message = str(exc)
-        failure_class = JobFailureClass.SESSION_EXPIRED if "session expired" in message.lower() else JobFailureClass.PERMANENT
+        failure_class = _job_failure_class(exc)
         with session_scope() as db:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
@@ -157,7 +166,7 @@ async def _process_group_send(job_id: UUID) -> None:
         result = _normalize(await driver.send_group_message(payload.get("group_name", ""), payload.get("message", "")))
     except Exception as exc:
         message = str(exc)
-        failure_class = JobFailureClass.SESSION_EXPIRED if "session expired" in message.lower() else JobFailureClass.PERMANENT
+        failure_class = _job_failure_class(exc)
         with session_scope() as db:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
@@ -212,7 +221,7 @@ async def _process_campaign_send(job_id: UUID) -> None:
         )
     except Exception as exc:
         message = str(exc)
-        failure_class = JobFailureClass.SESSION_EXPIRED if "session expired" in message.lower() else JobFailureClass.PERMANENT
+        failure_class = _job_failure_class(exc)
         with session_scope() as db:
             job = db.get(AutomationJob, job_id)
             campaign = get_campaign(db, workspace_id, campaign_id)
