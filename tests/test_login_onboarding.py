@@ -46,6 +46,11 @@ class FakeMatches:
         return FakeQr()
 
 
+class EmptyMatches:
+    def count(self) -> int:
+        return 0
+
+
 class FakePage:
     def __init__(self) -> None:
         self.closed = False
@@ -58,6 +63,26 @@ class FakePage:
 
     def locator(self, selector: str) -> FakeMatches:
         return FakeMatches()
+
+
+class PanelFallbackPage(FakePage):
+    def locator(self, selector: str):
+        if selector == "main":
+            return FakeMatches()
+        return EmptyMatches()
+
+
+class FullPageFallbackPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.full_page_requested = False
+
+    def locator(self, selector: str) -> EmptyMatches:
+        return EmptyMatches()
+
+    def screenshot(self, **kwargs) -> bytes:
+        self.full_page_requested = kwargs.get("full_page") is True
+        return b"full-page-png"
 
 
 class LockedChromium:
@@ -91,6 +116,34 @@ class LoginOnboardingTests(unittest.TestCase):
 
         expected = "data:image/png;base64," + base64.b64encode(b"png-data").decode("ascii")
         self.assertEqual(driver._capture_login_qr_sync(), expected)
+
+    def test_qr_capture_falls_back_to_login_panel(self) -> None:
+        driver = object.__new__(ZaloDriver)
+        driver._login_page = PanelFallbackPage()
+
+        expected = "data:image/png;base64," + base64.b64encode(b"png-data").decode("ascii")
+        self.assertEqual(driver._capture_login_qr_sync(), expected)
+        self.assertEqual(driver._last_qr_capture_mode, "login_panel")
+
+    def test_qr_capture_falls_back_to_full_page(self) -> None:
+        driver = object.__new__(ZaloDriver)
+        page = FullPageFallbackPage()
+        driver._login_page = page
+
+        expected = "data:image/png;base64," + base64.b64encode(b"full-page-png").decode("ascii")
+        self.assertEqual(driver._capture_login_qr_sync(), expected)
+        self.assertTrue(page.full_page_requested)
+        self.assertEqual(driver._last_qr_capture_mode, "full_page")
+
+    def test_status_can_skip_qr_capture_for_background_checks(self) -> None:
+        driver = object.__new__(ZaloDriver)
+        driver._login_state = LoginState.WAITING_QR
+        driver._profile_name = None
+        driver._profile_avatar = None
+        driver._capture_login_qr_sync = lambda: self.fail("QR capture should be skipped")
+
+        result = driver._status_dict("Waiting", include_qr=False)
+        self.assertIsNone(result["qr_image_base64"])
 
     def test_chrome_singleton_lock_becomes_clear_retryable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

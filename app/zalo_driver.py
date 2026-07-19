@@ -49,13 +49,23 @@ ZALO_CHAT_URL = "https://chat.zalo.me/"
 PROFILE_LOCK_RETRY_SECONDS = 2
 PROFILE_LOCK_TIMEOUT_SECONDS = 20
 QR_SELECTORS = [
+    'img[src*="qr" i]',
     '[data-testid*="qr" i]',
     '[class*="qrcode" i]',
     '[class*="qr-code" i]',
     '[class*="qr_code" i]',
     '[class*="qr" i] canvas',
     '[class*="qr" i] img',
-    'canvas[width][height]',
+    '[class*="qr" i] svg',
+    'canvas',
+]
+LOGIN_PANEL_SELECTORS = [
+    '[data-testid*="login" i]',
+    '[class*="login" i]',
+    '[class*="signin" i]',
+    '[class*="sign-in" i]',
+    '[class*="auth" i]',
+    'main',
 ]
 SYNC_DEBUG_ENABLED = os.getenv("ZALO_SYNC_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SEND_DEBUG_ENABLED = (
@@ -206,6 +216,8 @@ class ZaloDriver:
         self._login_state: LoginState = LoginState.IDLE
         self._profile_name: Optional[str] = None
         self._profile_avatar: Optional[str] = None
+        self._last_qr_capture_mode: Optional[str] = None
+        self._last_qr_capture_warning_at = 0.0
         self._worker_browser: Optional[Browser] = None
         logger.info(
             "Initialized ZaloDriver workspace=%s host_identity=%s display=%s profile_path=%s",
@@ -381,14 +393,14 @@ class ZaloDriver:
     async def start_login(self) -> dict:
         return await _run_in_thread(self._start_login_sync)
 
-    def _check_login_sync(self) -> dict:
+    def _check_login_sync(self, include_qr: bool = True) -> dict:
         if self._login_state == LoginState.AUTHENTICATED:
-            return self._status_dict("Already authenticated.")
+            return self._status_dict("Already authenticated.", include_qr=include_qr)
 
         if not self._login_page or self._login_page.is_closed():
             self._login_state = LoginState.IDLE
             self._close_login_sync()
-            return self._status_dict("No login browser is open.")
+            return self._status_dict("No login browser is open.", include_qr=include_qr)
 
         try:
             is_auth = self._detect_auth(self._login_page)
@@ -396,21 +408,24 @@ class ZaloDriver:
                 self._login_state = LoginState.AUTHENTICATED
                 self._extract_profile(self._login_page)
                 logger.info(f"Login successful — profile: {self._profile_name}")
-                result = self._status_dict("Authenticated successfully. The login browser was closed safely.")
+                result = self._status_dict(
+                    "Authenticated successfully. The login browser was closed safely.",
+                    include_qr=include_qr,
+                )
                 self._close_login_sync()
                 return result
             else:
                 self._login_state = LoginState.WAITING_QR
-                return self._status_dict("Waiting for QR scan or phone login...")
+                return self._status_dict("Waiting for QR scan or phone login...", include_qr=include_qr)
         except Exception as e:
             logger.warning(f"Login check error: {e}")
             self._login_state = LoginState.ERROR
-            result = self._status_dict(f"Error: {e}")
+            result = self._status_dict(f"Error: {e}", include_qr=include_qr)
             self._close_login_sync()
             return result
 
-    async def check_login_status(self) -> dict:
-        return await _run_in_thread(self._check_login_sync)
+    async def check_login_status(self, include_qr: bool = True) -> dict:
+        return await _run_in_thread(self._check_login_sync, include_qr)
 
     def _stop_login_sync(self) -> dict:
         self._close_login_sync()
@@ -437,29 +452,71 @@ class ZaloDriver:
         if not self._login_page or self._login_page.is_closed():
             return None
 
-        for selector in QR_SELECTORS:
+        exact = self._capture_visible_locator_screenshot(QR_SELECTORS, "exact_qr", min_width=80, min_height=80)
+        if exact:
+            return exact
+        logger.debug("QR capture: exact selectors unavailable; trying login panel.")
+
+        panel = self._capture_visible_locator_screenshot(
+            LOGIN_PANEL_SELECTORS,
+            "login_panel",
+            min_width=240,
+            min_height=180,
+        )
+        if panel:
+            return panel
+        logger.debug("QR capture: login panel unavailable; falling back to full page screenshot.")
+
+        try:
+            png = self._login_page.screenshot(type="png", full_page=True)
+            return self._qr_screenshot_result(png, "full_page")
+        except Exception as exc:
+            now = time.monotonic()
+            if now - getattr(self, "_last_qr_capture_warning_at", 0.0) >= 10:
+                logger.warning("QR capture failed for all strategies workspace=%s error=%s", self.workspace_key, exc)
+                self._last_qr_capture_warning_at = now
+        return None
+
+    def _capture_visible_locator_screenshot(
+        self,
+        selectors: list[str],
+        mode: str,
+        *,
+        min_width: float,
+        min_height: float,
+    ) -> Optional[str]:
+        for selector in selectors:
             try:
                 matches = self._login_page.locator(selector)
-                for index in range(min(matches.count(), 8)):
+                for index in range(min(matches.count(), 12)):
                     candidate = matches.nth(index)
                     if not candidate.is_visible():
                         continue
                     box = candidate.bounding_box()
                     if not box:
                         continue
-                    width = float(box.get("width", 0))
-                    height = float(box.get("height", 0))
-                    if min(width, height) < 120 or max(width, height) > 600:
-                        continue
-                    if max(width, height) / max(min(width, height), 1) > 1.35:
+                    if float(box.get("width", 0)) < min_width or float(box.get("height", 0)) < min_height:
                         continue
                     png = candidate.screenshot(type="png")
-                    return f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+                    return self._qr_screenshot_result(png, mode, selector=selector)
             except Exception as exc:
-                logger.debug("QR capture selector failed selector=%s error=%s", selector, exc)
+                logger.debug("QR capture selector failed mode=%s selector=%s error=%s", mode, selector, exc)
         return None
 
-    def _status_dict(self, message: str) -> dict:
+    def _qr_screenshot_result(self, png: bytes, mode: str, selector: Optional[str] = None) -> str:
+        previous_mode = getattr(self, "_last_qr_capture_mode", None)
+        if previous_mode != mode:
+            logger.info(
+                "QR capture succeeded workspace=%s mode=%s selector=%s bytes=%s",
+                getattr(self, "workspace_key", "unknown"),
+                mode,
+                selector,
+                len(png),
+            )
+            self._last_qr_capture_mode = mode
+        return f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+
+    def _status_dict(self, message: str, include_qr: bool = True) -> dict:
         return {
             "state": self._login_state.value,
             "profile_name": self._profile_name,
@@ -468,7 +525,7 @@ class ZaloDriver:
             "message": message,
             "qr_image_base64": (
                 self._capture_login_qr_sync()
-                if self._login_state == LoginState.WAITING_QR
+                if include_qr and self._login_state == LoginState.WAITING_QR
                 else None
             ),
         }

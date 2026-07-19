@@ -144,7 +144,7 @@ async def _watch_workspace_login(workspace_id: UUID) -> None:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(1.5)
             driver = await _workspace_driver(workspace_id)
-            result = LoginStatus(**(await driver.check_login_status()))
+            result = LoginStatus(**(await driver.check_login_status(include_qr=False)))
             with session_scope() as db:
                 update_workspace_login_status(db, workspace_id, result)
             if result.state != LoginState.WAITING_QR:
@@ -476,7 +476,7 @@ async def sync_contacts(
 ):
     driver = await _workspace_driver(context.active_workspace_id)
     if await driver.is_login_browser_active():
-        login_result = LoginStatus(**(await driver.check_login_status()))
+        login_result = LoginStatus(**(await driver.check_login_status(include_qr=False)))
         update_workspace_login_status(db, context.active_workspace_id, login_result)
         if login_result.state == LoginState.WAITING_QR:
             raise HTTPException(
