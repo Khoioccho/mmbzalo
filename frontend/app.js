@@ -509,7 +509,9 @@
 
     if (data.state === "waiting_qr") {
       text.textContent = "Waiting for login";
-      detail.textContent = data.message || "Scan the QR code or complete the login in the browser window.";
+      detail.textContent = hasQrImage
+        ? (data.message || "Scan the QR code with Zalo on your phone.")
+        : "Preparing the Zalo QR image. This page will update automatically...";
       icon.className = "login-state login-state--waiting";
       btnStart.disabled = true;
       btnStop.disabled = false;
