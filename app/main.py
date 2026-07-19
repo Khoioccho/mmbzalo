@@ -4,6 +4,7 @@ FastAPI application for the PostgreSQL-backed multi-workspace MMBZalo service.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from uuid import UUID
@@ -31,7 +32,7 @@ from app.api_models import (
 )
 from app.config import get_settings
 from app.database import get_db, session_scope
-from app.db_models import AuditActorType, CampaignStatus, JobType, MembershipRole
+from app.db_models import AuditActorType, CampaignStatus, JobType, MembershipRole, WorkspaceLoginState
 from app.dependencies import RequestContext, get_request_context, require_role
 from app.models import (
     AppSettings,
@@ -45,6 +46,7 @@ from app.models import (
     ContactSyncRunListResult,
     FriendRequestPayload,
     GroupMessagePayload,
+    LoginState,
     LoginStatus,
     MessagePayload,
 )
@@ -86,6 +88,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 settings = get_settings()
+LOGIN_WATCH_TIMEOUT_SECONDS = 600
+_login_watch_tasks: dict[UUID, asyncio.Task] = {}
 
 
 def _cookie_value(request: Request) -> str | None:
@@ -134,10 +138,59 @@ async def _workspace_driver(workspace_id: UUID) -> object:
     return await get_driver(str(workspace_id), settings, _driver_settings_provider(workspace_id))
 
 
+async def _watch_workspace_login(workspace_id: UUID) -> None:
+    deadline = asyncio.get_running_loop().time() + LOGIN_WATCH_TIMEOUT_SECONDS
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(1.5)
+            driver = await _workspace_driver(workspace_id)
+            result = LoginStatus(**(await driver.check_login_status()))
+            with session_scope() as db:
+                update_workspace_login_status(db, workspace_id, result)
+            if result.state != LoginState.WAITING_QR:
+                return
+
+        driver = await _workspace_driver(workspace_id)
+        result = LoginStatus(**(await driver.stop_login()))
+        result.message = "Zalo login timed out. Start a new connection to receive a fresh QR code."
+        with session_scope() as db:
+            update_workspace_login_status(db, workspace_id, result)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Workspace login watcher failed workspace_id=%s", workspace_id)
+    finally:
+        current_task = asyncio.current_task()
+        if _login_watch_tasks.get(workspace_id) is current_task:
+            _login_watch_tasks.pop(workspace_id, None)
+
+
+def _start_workspace_login_watcher(workspace_id: UUID) -> None:
+    existing = _login_watch_tasks.pop(workspace_id, None)
+    if existing:
+        existing.cancel()
+    _login_watch_tasks[workspace_id] = asyncio.create_task(
+        _watch_workspace_login(workspace_id),
+        name=f"zalo-login-{workspace_id}",
+    )
+
+
+def _cancel_workspace_login_watcher(workspace_id: UUID) -> None:
+    task = _login_watch_tasks.pop(workspace_id, None)
+    if task:
+        task.cancel()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("MMBZalo production service started.")
     yield
+    tasks = list(_login_watch_tasks.values())
+    _login_watch_tasks.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     await shutdown_all_drivers()
     logger.info("Shut down complete.")
 
@@ -318,6 +371,15 @@ async def workspace_switch(
 async def login_status(context: RequestContext = Depends(get_request_context), db: Session = Depends(get_db)):
     driver = await _workspace_driver(context.active_workspace_id)
     result = LoginStatus(**(await driver.check_login_status()))
+    stored_session = get_workspace_session_result(db, context.active_workspace_id)
+    if result.state == LoginState.IDLE and stored_session.login_state == WorkspaceLoginState.AUTHENTICATED:
+        return LoginStatus(
+            state=LoginState.AUTHENTICATED,
+            profile_name=stored_session.profile_name,
+            profile_avatar=stored_session.profile_avatar_url,
+            phone_number=stored_session.phone_number,
+            message="Stored workspace session is authenticated and ready.",
+        )
     update_workspace_login_status(db, context.active_workspace_id, result)
     return result
 
@@ -339,6 +401,7 @@ async def login_start(
         actor_type=AuditActorType.USER,
         actor_user_id=context.user.id,
     )
+    _start_workspace_login_watcher(context.active_workspace_id)
     return result
 
 
@@ -347,6 +410,7 @@ async def login_stop(
     context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
     db: Session = Depends(get_db),
 ):
+    _cancel_workspace_login_watcher(context.active_workspace_id)
     driver = await _workspace_driver(context.active_workspace_id)
     result = LoginStatus(**(await driver.stop_login()))
     update_workspace_login_status(db, context.active_workspace_id, result)
@@ -410,6 +474,15 @@ async def sync_contacts(
     context: RequestContext = Depends(require_role(MembershipRole.OPERATOR)),
     db: Session = Depends(get_db),
 ):
+    driver = await _workspace_driver(context.active_workspace_id)
+    if await driver.is_login_browser_active():
+        login_result = LoginStatus(**(await driver.check_login_status()))
+        update_workspace_login_status(db, context.active_workspace_id, login_result)
+        if login_result.state == LoginState.WAITING_QR:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Zalo login is still waiting for a QR scan. Finish or stop login before syncing contacts.",
+            )
     try:
         return create_job(
             db,

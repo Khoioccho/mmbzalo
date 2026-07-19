@@ -299,6 +299,9 @@
     $("#login-name").textContent = "";
     $("#btn-login-start").disabled = true;
     $("#btn-login-stop").disabled = true;
+    $("#btn-login-sync-contacts").style.display = "none";
+    $("#login-qr").style.display = "none";
+    $("#login-qr-image").removeAttribute("src");
     $$(".nav-item").forEach((btn) => {
       const unlocked = btn.dataset.module === "login";
       btn.disabled = !unlocked;
@@ -456,6 +459,18 @@
     const detail = $("#login-state-detail");
     const btnStart = $("#btn-login-start");
     const btnStop = $("#btn-login-stop");
+    const btnSync = $("#btn-login-sync-contacts");
+    const qrPanel = $("#login-qr");
+    const qrImage = $("#login-qr-image");
+    const hasQrImage = typeof data.qr_image_base64 === "string"
+      && data.qr_image_base64.startsWith("data:image/png;base64,");
+
+    qrPanel.style.display = hasQrImage ? "block" : "none";
+    if (hasQrImage) {
+      qrImage.src = data.qr_image_base64;
+    } else {
+      qrImage.removeAttribute("src");
+    }
 
     if (!state.auth.authenticated) {
       text.textContent = "Dashboard sign-in required";
@@ -463,6 +478,7 @@
       icon.className = "login-state";
       btnStart.disabled = true;
       btnStop.disabled = true;
+      btnSync.style.display = "none";
       $("#login-info").style.display = "none";
       return;
     }
@@ -482,7 +498,8 @@
       detail.textContent = data.message || "Workspace session is ready.";
       icon.className = "login-state login-state--ok";
       btnStart.disabled = true;
-      btnStop.disabled = false;
+      btnStop.disabled = true;
+      btnSync.style.display = "inline-flex";
       if (state.lastRenderedLoginState !== "authenticated") {
         log(`Workspace Zalo session ready${data.profile_name ? ` for ${data.profile_name}` : ""}.`, "success");
       }
@@ -496,6 +513,7 @@
       icon.className = "login-state login-state--waiting";
       btnStart.disabled = true;
       btnStop.disabled = false;
+      btnSync.style.display = "none";
       state.lastRenderedLoginState = "waiting_qr";
       return;
     }
@@ -506,6 +524,7 @@
       icon.className = "login-state login-state--err";
       btnStart.disabled = false;
       btnStop.disabled = false;
+      btnSync.style.display = "none";
       state.lastRenderedLoginState = "expired";
       return;
     }
@@ -516,15 +535,17 @@
       icon.className = "login-state login-state--err";
       btnStart.disabled = false;
       btnStop.disabled = false;
+      btnSync.style.display = "none";
       state.lastRenderedLoginState = "error";
       return;
     }
 
     text.textContent = "Not connected";
-    detail.textContent = data.message || 'Click "Start Login" to begin.';
+    detail.textContent = data.message || 'Click "Connect Zalo" to begin.';
     icon.className = "login-state";
     btnStart.disabled = false;
     btnStop.disabled = true;
+    btnSync.style.display = "none";
     state.lastRenderedLoginState = "idle";
   }
 
@@ -541,7 +562,7 @@
         stopLoginPolling();
         log(`Login status error: ${err.message}`, "error");
       }
-    }, 2500);
+    }, 1500);
   }
 
   function latestJobMessage(job) {
@@ -1394,7 +1415,7 @@
       try {
         const data = await apiRequest("/api/login/start", { method: "POST" });
         renderZaloLoginState(data);
-        log("Browser opened. Complete login in the remote browser session.");
+        log("Zalo login started. Scan the QR code shown on this page.");
         startLoginPolling();
       } catch (err) {
         renderZaloLoginState({ state: "error", message: err.message });
@@ -1409,6 +1430,14 @@
         renderZaloLoginState(data);
       } catch (err) {
         renderZaloLoginState({ state: "error", message: err.message });
+      }
+    });
+
+    $("#btn-login-sync-contacts").addEventListener("click", () => {
+      const contactsNav = $('.nav-item[data-module="contacts"]');
+      if (contactsNav && !contactsNav.disabled) {
+        contactsNav.click();
+        $("#btn-sync-contacts").click();
       }
     });
   }
