@@ -7,8 +7,10 @@ import time
 import uuid
 from pathlib import Path
 
+from app.browser_errors import ProfileLockedError
 
-class BrowserProfileInUseError(RuntimeError):
+
+class BrowserProfileInUseError(ProfileLockedError):
     pass
 
 

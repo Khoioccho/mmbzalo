@@ -29,6 +29,14 @@ from typing import Any, Callable, Optional
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page
 
+from app.browser_errors import (
+    BrowserStartFailedError,
+    PlaywrightRuntimeUnavailableError,
+    PlaywrightThreadMismatchError,
+    ServiceError,
+    WorkspaceBrowserBusyError,
+    ZaloNotAuthenticatedError,
+)
 from app.browser_lease import BrowserProfileInUseError, BrowserProfileLease
 from app.config import Settings
 from app.contact_name_utils import choose_best_contact_name, normalize_contact_name
@@ -148,12 +156,19 @@ CONVERSATION_VIEW_MARKERS = [
 
 # Single owner thread: sync Playwright objects never enter FastAPI's event loop.
 class _PlaywrightThread:
-    """Own all sync Playwright objects on one thread without an asyncio loop."""
+    """Own one persistent sync Playwright runtime for the current process."""
 
     def __init__(self) -> None:
         self._tasks: queue.Queue[tuple[Future, Callable, tuple, dict]] = queue.Queue()
         self._start_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._owner_thread_id: Optional[int] = None
+        self._playwright: Optional[Playwright] = None
+        self._runtime_state = "stopped"
+        self._process_role = "unknown"
+
+    def set_process_role(self, process_role: str) -> None:
+        self._process_role = process_role
 
     def submit(self, fn: Callable, *args, **kwargs) -> Future:
         self._ensure_started()
@@ -167,6 +182,10 @@ class _PlaywrightThread:
         with self._start_lock:
             if self._thread and self._thread.is_alive():
                 return
+            if self._thread is not None:
+                self._playwright = None
+                self._owner_thread_id = None
+                self._runtime_state = "stopped"
             self._thread = threading.Thread(
                 target=self._run,
                 name="playwright-owner",
@@ -177,15 +196,154 @@ class _PlaywrightThread:
     def _run(self) -> None:
         # Playwright's sync API rejects threads with a running asyncio loop.
         asyncio.set_event_loop(None)
-        logger.info("Playwright owner thread started.")
+        self._owner_thread_id = threading.get_ident()
+        logger.info(
+            "event=playwright_owner_started process_role=%s thread_name=%s thread_id=%s runtime_state=%s",
+            self._process_role,
+            threading.current_thread().name,
+            self._owner_thread_id,
+            self._runtime_state,
+        )
         while True:
             future, fn, args, kwargs = self._tasks.get()
             if not future.set_running_or_notify_cancel():
                 continue
+            started_at = time.monotonic()
+            bound_driver = getattr(fn, "__self__", None)
+            workspace_key = getattr(bound_driver, "workspace_key", None)
+            operation = getattr(fn, "__name__", fn.__class__.__name__)
+            logger.debug(
+                "event=playwright_operation_started process_role=%s workspace_id=%s driver_id=%s "
+                "operation=%s thread_name=%s thread_id=%s owner_thread_id=%s runtime_state=%s",
+                self._process_role,
+                workspace_key,
+                id(bound_driver) if workspace_key else None,
+                operation,
+                threading.current_thread().name,
+                threading.get_ident(),
+                self._owner_thread_id,
+                self._runtime_state,
+            )
             try:
                 future.set_result(fn(*args, **kwargs))
             except BaseException as exc:
+                log = logger.warning if isinstance(exc, ServiceError) else logger.exception
+                log(
+                    "event=playwright_operation_failed process_role=%s workspace_id=%s driver_id=%s "
+                    "operation=%s thread_id=%s owner_thread_id=%s runtime_state=%s duration_ms=%s error_code=%s",
+                    self._process_role,
+                    workspace_key,
+                    id(bound_driver) if workspace_key else None,
+                    operation,
+                    threading.get_ident(),
+                    self._owner_thread_id,
+                    self._runtime_state,
+                    round((time.monotonic() - started_at) * 1000),
+                    getattr(exc, "error_code", "UNEXPECTED_BROWSER_ERROR"),
+                )
                 future.set_exception(exc)
+            else:
+                logger.debug(
+                    "event=playwright_operation_succeeded process_role=%s workspace_id=%s driver_id=%s "
+                    "operation=%s duration_ms=%s",
+                    self._process_role,
+                    workspace_key,
+                    id(bound_driver) if workspace_key else None,
+                    operation,
+                    round((time.monotonic() - started_at) * 1000),
+                )
+
+    def _assert_owner_thread(self) -> None:
+        current_thread_id = threading.get_ident()
+        if self._owner_thread_id != current_thread_id:
+            logger.error(
+                "event=playwright_thread_mismatch process_role=%s thread_id=%s owner_thread_id=%s runtime_state=%s",
+                self._process_role,
+                current_thread_id,
+                self._owner_thread_id,
+                self._runtime_state,
+            )
+            raise PlaywrightThreadMismatchError()
+
+    def get_playwright_sync(self) -> Playwright:
+        self._assert_owner_thread()
+        if self._playwright is not None:
+            return self._playwright
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            logger.error(
+                "event=playwright_thread_mismatch process_role=%s thread_id=%s owner_thread_id=%s runtime_state=%s",
+                self._process_role,
+                threading.get_ident(),
+                self._owner_thread_id,
+                self._runtime_state,
+            )
+            raise PlaywrightThreadMismatchError()
+
+        self._runtime_state = "starting"
+        try:
+            self._playwright = sync_playwright().start()
+        except Exception as exc:
+            self._playwright = None
+            self._runtime_state = "failed"
+            logger.exception(
+                "event=playwright_initialization_failed process_role=%s thread_id=%s error_code=%s",
+                self._process_role,
+                self._owner_thread_id,
+                PlaywrightRuntimeUnavailableError.error_code,
+            )
+            raise PlaywrightRuntimeUnavailableError() from exc
+
+        self._runtime_state = "ready"
+        logger.info(
+            "event=playwright_initialized process_role=%s thread_id=%s owner_thread_id=%s runtime_state=%s",
+            self._process_role,
+            threading.get_ident(),
+            self._owner_thread_id,
+            self._runtime_state,
+        )
+        return self._playwright
+
+    def stop_playwright_sync(self) -> None:
+        self._assert_owner_thread()
+        playwright = self._playwright
+        self._playwright = None
+        if playwright is None:
+            self._runtime_state = "stopped"
+            return
+        self._runtime_state = "stopping"
+        try:
+            playwright.stop()
+        finally:
+            self._runtime_state = "stopped"
+            logger.info(
+                "event=playwright_stopped process_role=%s thread_id=%s runtime_state=%s",
+                self._process_role,
+                self._owner_thread_id,
+                self._runtime_state,
+            )
+
+    def invalidate_playwright_sync(self, reason: str) -> None:
+        self._assert_owner_thread()
+        playwright = self._playwright
+        self._playwright = None
+        self._runtime_state = "failed"
+        if playwright is not None:
+            try:
+                playwright.stop()
+            except Exception:
+                logger.debug("Failed to stop invalid Playwright runtime.", exc_info=True)
+        logger.error(
+            "event=playwright_runtime_invalidated process_role=%s thread_id=%s reason=%s runtime_state=%s",
+            self._process_role,
+            self._owner_thread_id,
+            reason,
+            self._runtime_state,
+        )
 
 
 _playwright_thread = _PlaywrightThread()
@@ -193,7 +351,20 @@ _playwright_thread = _PlaywrightThread()
 
 async def _run_in_thread(fn: Callable, *args, **kwargs) -> Any:
     """Run a sync driver operation on the dedicated Playwright owner thread."""
-    return await asyncio.wrap_future(_playwright_thread.submit(fn, *args, **kwargs))
+    try:
+        return await asyncio.wrap_future(_playwright_thread.submit(fn, *args, **kwargs))
+    except ServiceError:
+        raise
+    except Exception as exc:
+        bound_driver = getattr(fn, "__self__", None)
+        if isinstance(bound_driver, ZaloDriver) and ZaloDriver._is_playwright_runtime_error(exc):
+            await asyncio.wrap_future(_playwright_thread.submit(_invalidate_shared_runtime_sync, str(exc)))
+            raise PlaywrightRuntimeUnavailableError() from exc
+        raise
+
+
+def set_playwright_process_role(process_role: str) -> None:
+    _playwright_thread.set_process_role(process_role)
 
 
 class ZaloDriver:
@@ -220,8 +391,15 @@ class ZaloDriver:
         self._last_qr_capture_warning_at = 0.0
         self._worker_browser: Optional[Browser] = None
         logger.info(
-            "Initialized ZaloDriver workspace=%s host_identity=%s display=%s profile_path=%s",
+            "event=driver_created process_role=%s workspace_id=%s driver_id=%s thread_name=%s "
+            "thread_id=%s owner_thread_id=%s runtime_state=%s host_identity=%s display=%s profile_path=%s",
+            _playwright_thread._process_role,
             self.workspace_key,
+            id(self),
+            threading.current_thread().name,
+            threading.get_ident(),
+            _playwright_thread._owner_thread_id,
+            _playwright_thread._runtime_state,
             self._deployment_settings.host_identity,
             self._deployment_settings.login_display,
             self.profile_path,
@@ -241,16 +419,7 @@ class ZaloDriver:
     # ═══════════════════════════════════════════════════════════
 
     def _ensure_pw(self):
-        if not self._pw:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                pass
-            else:
-                raise RuntimeError("Sync Playwright initialization escaped its dedicated owner thread.")
-
-            self._pw = sync_playwright().start()
-            logger.info("Playwright started (sync_api, threaded).")
+        self._pw = _playwright_thread.get_playwright_sync()
 
     def _load_runtime_settings(self) -> AppSettings:
         try:
@@ -303,18 +472,21 @@ class ZaloDriver:
     def _shutdown_sync(self):
         self._close_login_sync()
         self._close_worker_sync()
-        if self._pw:
-            try:
-                self._pw.stop()
-            except Exception:
-                pass
-            self._pw = None
-        logger.info("Playwright shut down.")
+        self._pw = None
+        logger.info("event=driver_stopped workspace_id=%s driver_id=%s", self.workspace_key, id(self))
 
     async def shutdown(self):
         await _run_in_thread(self._shutdown_sync)
 
     def _close_login_sync(self):
+        had_browser = bool(self._login_page or self._login_context)
+        workspace_key = getattr(self, "workspace_key", "unknown")
+        if had_browser:
+            logger.info(
+                "event=browser_close_started workspace_id=%s driver_id=%s owner=login_browser",
+                workspace_key,
+                id(self),
+            )
         if self._login_page:
             try:
                 self._login_page.close()
@@ -330,6 +502,18 @@ class ZaloDriver:
         if self._login_lease:
             self._login_lease.release()
             self._login_lease = None
+            logger.info(
+                "event=profile_released workspace_id=%s driver_id=%s owner=login_browser profile_path=%s",
+                workspace_key,
+                id(self),
+                getattr(self, "profile_path", "unknown"),
+            )
+        if had_browser:
+            logger.info(
+                "event=browser_closed workspace_id=%s driver_id=%s owner=login_browser",
+                workspace_key,
+                id(self),
+            )
 
     def _close_worker_sync(self):
         if self._worker_browser:
@@ -345,6 +529,8 @@ class ZaloDriver:
 
     def _start_login_sync(self) -> dict:
         self._ensure_pw()
+        if self._is_login_browser_active_sync():
+            raise WorkspaceBrowserBusyError("Zalo login is already active for this workspace.")
         self._close_login_sync()
 
         self.profile_path.mkdir(parents=True, exist_ok=True)
@@ -357,8 +543,14 @@ class ZaloDriver:
         try:
             proxy = self._get_launch_proxy_config()
             logger.info(
-                "Launching login browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+                "event=browser_launch_started process_role=%s workspace_id=%s driver_id=%s owner=login_browser "
+                "thread_id=%s owner_thread_id=%s runtime_state=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+                _playwright_thread._process_role,
                 self.workspace_key,
+                id(self),
+                threading.get_ident(),
+                _playwright_thread._owner_thread_id,
+                _playwright_thread._runtime_state,
                 self._deployment_settings.host_identity,
                 self._deployment_settings.login_display,
                 self.profile_path,
@@ -373,6 +565,17 @@ class ZaloDriver:
                 else self._login_context.new_page()
             )
             self._login_page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=30_000)
+            logger.info(
+                "event=browser_launched process_role=%s workspace_id=%s driver_id=%s owner=login_browser "
+                "thread_id=%s owner_thread_id=%s runtime_state=%s profile_path=%s",
+                _playwright_thread._process_role,
+                self.workspace_key,
+                id(self),
+                threading.get_ident(),
+                _playwright_thread._owner_thread_id,
+                _playwright_thread._runtime_state,
+                self.profile_path,
+            )
         except Exception as exc:
             if proxy:
                 logger.error(f"Login browser launch failed with proxy {proxy.get('server')}: {exc}")
@@ -381,7 +584,12 @@ class ZaloDriver:
                 raise BrowserProfileInUseError(
                     "Workspace browser profile is currently in use. Close the existing browser and retry Zalo login."
                 ) from exc
-            raise
+            if isinstance(exc, PlaywrightRuntimeUnavailableError):
+                raise
+            if self._is_playwright_runtime_error(exc):
+                _invalidate_shared_runtime_sync(str(exc))
+                raise PlaywrightRuntimeUnavailableError() from exc
+            raise BrowserStartFailedError() from exc
 
         self._login_state = LoginState.WAITING_QR
         self._profile_name = None
@@ -407,7 +615,12 @@ class ZaloDriver:
             if is_auth:
                 self._login_state = LoginState.AUTHENTICATED
                 self._extract_profile(self._login_page)
-                logger.info(f"Login successful — profile: {self._profile_name}")
+                logger.info(
+                    "event=authentication_detected workspace_id=%s driver_id=%s profile_name=%s",
+                    getattr(self, "workspace_key", "unknown"),
+                    id(self),
+                    self._profile_name,
+                )
                 result = self._status_dict(
                     "Authenticated successfully. The login browser was closed safely.",
                     include_qr=include_qr,
@@ -418,6 +631,12 @@ class ZaloDriver:
                 self._login_state = LoginState.WAITING_QR
                 return self._status_dict("Waiting for QR scan or phone login...", include_qr=include_qr)
         except Exception as e:
+            if isinstance(e, (PlaywrightRuntimeUnavailableError, PlaywrightThreadMismatchError)):
+                self._close_login_sync()
+                raise
+            if self._is_playwright_runtime_error(e):
+                _invalidate_shared_runtime_sync(str(e))
+                raise PlaywrightRuntimeUnavailableError() from e
             logger.warning(f"Login check error: {e}")
             self._login_state = LoginState.ERROR
             result = self._status_dict(f"Error: {e}", include_qr=include_qr)
@@ -507,8 +726,14 @@ class ZaloDriver:
         previous_mode = getattr(self, "_last_qr_capture_mode", None)
         if previous_mode != mode:
             logger.info(
-                "QR capture succeeded workspace=%s mode=%s selector=%s bytes=%s",
+                "event=qr_capture_succeeded process_role=%s workspace_id=%s driver_id=%s "
+                "thread_id=%s owner_thread_id=%s runtime_state=%s mode=%s selector=%s bytes=%s",
+                _playwright_thread._process_role,
                 getattr(self, "workspace_key", "unknown"),
+                id(self),
+                threading.get_ident(),
+                _playwright_thread._owner_thread_id,
+                _playwright_thread._runtime_state,
                 mode,
                 selector,
                 len(png),
@@ -548,6 +773,20 @@ class ZaloDriver:
             )
         )
 
+    @staticmethod
+    def _is_playwright_runtime_error(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "playwright connection closed",
+                "connection closed while reading from the driver",
+                "driver transport",
+                "pipe has been ended",
+                "broken pipe",
+            )
+        )
+
     def _get_worker_context(self, owner_type: str) -> tuple[BrowserContext, BrowserProfileLease]:
         self._ensure_pw()
 
@@ -565,8 +804,15 @@ class ZaloDriver:
                 lease.release()
                 raise
             logger.info(
-                "Launching worker browser workspace=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+                "event=browser_launch_started process_role=%s workspace_id=%s driver_id=%s owner=%s "
+                "thread_id=%s owner_thread_id=%s runtime_state=%s host_identity=%s display=%s profile_path=%s proxy=%s",
+                _playwright_thread._process_role,
                 self.workspace_key,
+                id(self),
+                owner_type,
+                threading.get_ident(),
+                _playwright_thread._owner_thread_id,
+                _playwright_thread._runtime_state,
                 self._deployment_settings.host_identity,
                 self._deployment_settings.login_display,
                 self.profile_path,
@@ -578,13 +824,30 @@ class ZaloDriver:
                     context = self._pw.chromium.launch_persistent_context(
                         **self._persistent_context_kwargs(proxy=proxy, viewport={"width": 1440, "height": 900}),
                     )
+                    logger.info(
+                        "event=browser_launched process_role=%s workspace_id=%s driver_id=%s owner=%s "
+                        "thread_id=%s owner_thread_id=%s runtime_state=%s profile_path=%s",
+                        _playwright_thread._process_role,
+                        self.workspace_key,
+                        id(self),
+                        owner_type,
+                        threading.get_ident(),
+                        _playwright_thread._owner_thread_id,
+                        _playwright_thread._runtime_state,
+                        self.profile_path,
+                    )
                     return context, lease
                 except Exception as exc:
                     if not self._is_profile_lock_error(exc):
                         lease.release()
                         if proxy:
                             logger.error(f"Worker browser launch failed with proxy {proxy.get('server')}: {exc}")
-                        raise
+                        if isinstance(exc, PlaywrightRuntimeUnavailableError):
+                            raise
+                        if self._is_playwright_runtime_error(exc):
+                            _invalidate_shared_runtime_sync(str(exc))
+                            raise PlaywrightRuntimeUnavailableError() from exc
+                        raise BrowserStartFailedError() from exc
                     if time.monotonic() >= deadline:
                         lease.release()
                         raise BrowserProfileInUseError(
@@ -619,19 +882,42 @@ class ZaloDriver:
             page.goto(ZALO_CHAT_URL, wait_until="domcontentloaded", timeout=60_000)
             self._wait_for_shell_ready(page)
             if not self._detect_auth(page):
-                raise RuntimeError("Session expired or invalid. Please log in again.")
-        except Exception:
+                raise ZaloNotAuthenticatedError()
+        except Exception as exc:
             self._close_worker_context(context, lease)
-            raise
+            if isinstance(exc, ServiceError):
+                raise
+            if self._is_playwright_runtime_error(exc):
+                _invalidate_shared_runtime_sync(str(exc))
+                raise PlaywrightRuntimeUnavailableError() from exc
+            raise BrowserStartFailedError("The browser started but could not load Zalo.") from exc
 
         return context, page, lease
 
-    @staticmethod
-    def _close_worker_context(context: BrowserContext, lease: BrowserProfileLease) -> None:
+    def _close_worker_context(self, context: BrowserContext, lease: BrowserProfileLease) -> None:
+        logger.info(
+            "event=browser_close_started workspace_id=%s driver_id=%s owner=%s",
+            self.workspace_key,
+            id(self),
+            lease.owner_type,
+        )
         try:
             context.close()
         finally:
             lease.release()
+            logger.info(
+                "event=profile_released workspace_id=%s driver_id=%s owner=%s profile_path=%s",
+                self.workspace_key,
+                id(self),
+                lease.owner_type,
+                self.profile_path,
+            )
+            logger.info(
+                "event=browser_closed workspace_id=%s driver_id=%s owner=%s",
+                self.workspace_key,
+                id(self),
+                lease.owner_type,
+            )
 
     def _wait_for_shell_ready(self, page: Page, timeout_ms: int = 45_000):
         """Wait until the Zalo shell has rendered enough UI for navigation."""
@@ -1678,6 +1964,8 @@ class ZaloDriver:
                     success = True
                     logger.info(f"Message sent to {target}")
                 except Exception as e:
+                    if isinstance(e, ServiceError) or self._is_playwright_runtime_error(e):
+                        raise
                     error = str(e)
                     logger.warning(f"Failed: {target}: {e}")
 
@@ -1849,6 +2137,8 @@ class ZaloDriver:
                         }
                     )
                 except Exception as exc:
+                    if isinstance(exc, ServiceError) or self._is_playwright_runtime_error(exc):
+                        raise
                     error = str(exc)
                     if "search_result_not_found" in error:
                         route = "not_found"
@@ -1964,6 +2254,8 @@ class ZaloDriver:
                         raise Exception(f"No 'Add Friend' button for {phone}.")
 
                 except Exception as e:
+                    if isinstance(e, ServiceError) or self._is_playwright_runtime_error(e):
+                        raise
                     error = str(e)
                     logger.warning(f"Failed: {phone}: {e}")
 
@@ -2001,6 +2293,8 @@ class ZaloDriver:
             return {"success": True, "group_name": group_name,
                     "message": f"Message sent to group '{group_name}'."}
         except Exception as e:
+            if isinstance(e, ServiceError) or self._is_playwright_runtime_error(e):
+                raise
             logger.warning(f"Group message failed: {e}")
             return {"success": False, "group_name": group_name, "message": str(e)}
         finally:
@@ -2340,6 +2634,14 @@ class ZaloDriver:
 _drivers: dict[str, ZaloDriver] = {}
 
 
+def _invalidate_shared_runtime_sync(reason: str) -> None:
+    for driver in list(_drivers.values()):
+        driver._close_login_sync()
+        driver._close_worker_sync()
+        driver._pw = None
+    _playwright_thread.invalidate_playwright_sync(reason)
+
+
 async def get_driver(workspace_key: str, deployment_settings: Settings, settings_provider: Callable[[], AppSettings]) -> ZaloDriver:
     driver = _drivers.get(workspace_key)
     if driver is not None and not driver.matches_deployment_settings(deployment_settings):
@@ -2368,3 +2670,4 @@ async def shutdown_all_drivers() -> None:
     for driver in drivers:
         await driver.shutdown()
     _drivers.clear()
+    await _run_in_thread(_playwright_thread.stop_playwright_sync)

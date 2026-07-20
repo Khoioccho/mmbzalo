@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from app.api_models import (
     WorkspaceSummary,
     WorkspaceSwitchResult,
 )
+from app.browser_errors import ServiceError
 from app.config import get_settings
 from app.database import get_db, session_scope
 from app.db_models import AuditActorType, CampaignStatus, JobType, MembershipRole, WorkspaceLoginState
@@ -79,7 +80,7 @@ from app.services import (
     update_workspace_settings,
 )
 from app.rate_limit import rate_limiter
-from app.zalo_driver import get_driver, shutdown_all_drivers
+from app.zalo_driver import get_driver, set_playwright_process_role, shutdown_all_drivers
 
 
 logging.basicConfig(
@@ -88,6 +89,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 settings = get_settings()
+set_playwright_process_role("api")
 LOGIN_WATCH_TIMEOUT_SECONDS = 600
 _login_watch_tasks: dict[UUID, asyncio.Task] = {}
 
@@ -200,6 +202,20 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError):
+    logger.warning(
+        "Browser request failed path=%s error_code=%s retryable=%s",
+        request.url.path,
+        exc.error_code,
+        exc.retryable,
+    )
+    return JSONResponse(
+        status_code=exc.http_status,
+        content=exc.response_payload(),
+    )
 
 app.add_middleware(
     CORSMiddleware,

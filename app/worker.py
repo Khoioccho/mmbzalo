@@ -5,7 +5,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from app.browser_lease import BrowserProfileInUseError
+from app.browser_errors import BrowserServiceError
 from app.config import get_settings
 from app.database import session_scope
 from app.db_models import AutomationJob, CampaignStatus, Contact, JobFailureClass, JobStatus, JobType, WorkspaceLoginState
@@ -26,11 +26,12 @@ from app.services import (
     record_campaign_job_event,
     renew_job_lease,
 )
-from app.zalo_driver import get_driver
+from app.zalo_driver import get_driver, set_playwright_process_role
 
 
 logger = logging.getLogger("worker")
 settings = get_settings()
+set_playwright_process_role("worker")
 
 
 def _normalize(value: Any) -> Any:
@@ -44,11 +45,19 @@ def _normalize(value: Any) -> Any:
 
 
 def _job_failure_class(exc: Exception) -> JobFailureClass:
-    if isinstance(exc, BrowserProfileInUseError):
+    if isinstance(exc, BrowserServiceError) and exc.retryable:
         return JobFailureClass.TRANSIENT
     if "session expired" in str(exc).lower():
         return JobFailureClass.SESSION_EXPIRED
     return JobFailureClass.PERMANENT
+
+
+def _job_failure_result(exc: Exception) -> dict[str, Any]:
+    return {
+        "message": str(exc),
+        "error_code": getattr(exc, "error_code", "AUTOMATION_FAILED"),
+        "retryable": bool(getattr(exc, "retryable", False)),
+    }
 
 
 def _settings_provider(workspace_id: UUID):
@@ -89,7 +98,13 @@ async def _process_contact_sync(job_id: UUID) -> None:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
                 _mark_workspace_session_expired(workspace_id, message)
-            mark_job_failed(db, job, message=message, failure_class=failure_class)
+            mark_job_failed(
+                db,
+                job,
+                message=message,
+                failure_class=failure_class,
+                result=_job_failure_result(exc),
+            )
         return
     with session_scope() as db:
         job = db.get(AutomationJob, job_id)
@@ -120,7 +135,13 @@ async def _process_manual_send(job_id: UUID) -> None:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
                 _mark_workspace_session_expired(workspace_id, message)
-            mark_job_failed(db, job, message=message, failure_class=failure_class)
+            mark_job_failed(
+                db,
+                job,
+                message=message,
+                failure_class=failure_class,
+                result=_job_failure_result(exc),
+            )
         return
     with session_scope() as db:
         job = db.get(AutomationJob, job_id)
@@ -148,7 +169,13 @@ async def _process_friend_request(job_id: UUID) -> None:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
                 _mark_workspace_session_expired(workspace_id, message)
-            mark_job_failed(db, job, message=message, failure_class=failure_class)
+            mark_job_failed(
+                db,
+                job,
+                message=message,
+                failure_class=failure_class,
+                result=_job_failure_result(exc),
+            )
         return
     with session_scope() as db:
         job = db.get(AutomationJob, job_id)
@@ -171,7 +198,13 @@ async def _process_group_send(job_id: UUID) -> None:
             job = db.get(AutomationJob, job_id)
             if failure_class == JobFailureClass.SESSION_EXPIRED:
                 _mark_workspace_session_expired(workspace_id, message)
-            mark_job_failed(db, job, message=message, failure_class=failure_class)
+            mark_job_failed(
+                db,
+                job,
+                message=message,
+                failure_class=failure_class,
+                result=_job_failure_result(exc),
+            )
         return
     with session_scope() as db:
         job = db.get(AutomationJob, job_id)
@@ -228,7 +261,13 @@ async def _process_campaign_send(job_id: UUID) -> None:
             campaign.status = CampaignStatus.FAILED
             if failure_class == JobFailureClass.SESSION_EXPIRED:
                 _mark_workspace_session_expired(workspace_id, message)
-            mark_job_failed(db, job, message=message, failure_class=failure_class)
+            mark_job_failed(
+                db,
+                job,
+                message=message,
+                failure_class=failure_class,
+                result=_job_failure_result(exc),
+            )
         return
 
     with session_scope() as db:
@@ -272,10 +311,25 @@ async def process_job(job_id: UUID, job_type: JobType) -> None:
         mark_job_failed(db, job, message=f"Unsupported job type: {job_type}", failure_class=JobFailureClass.VALIDATION)
 
 
+async def _renew_active_job_lease(job_id: UUID) -> None:
+    interval = max(
+        1.0,
+        min(settings.worker_heartbeat_interval_seconds, settings.job_lease_seconds / 3),
+    )
+    while True:
+        await asyncio.sleep(interval)
+        with session_scope() as db:
+            job = db.get(AutomationJob, job_id)
+            if job is None or job.status not in {JobStatus.LEASED, JobStatus.RUNNING}:
+                return
+            heartbeat_worker(db)
+            renew_job_lease(db, job)
+
+
 async def worker_loop() -> None:
     logger.info("Worker loop started.")
     while True:
-        claimed_job: tuple[UUID, JobType] | None = None
+        claimed_job: tuple[UUID, JobType, UUID] | None = None
         with session_scope() as db:
             heartbeat_worker(db)
             job = claim_next_job(db)
@@ -283,13 +337,24 @@ async def worker_loop() -> None:
                 if job.cancel_requested:
                     mark_job_cancelled(db, job, "Job was cancelled before execution.")
                 else:
-                    claimed_job = (job.id, job.type)
+                    claimed_job = (job.id, job.type, job.workspace_id)
 
         if not claimed_job:
             await asyncio.sleep(settings.worker_poll_interval_seconds)
             continue
 
-        job_id, job_type = claimed_job
+        job_id, job_type, workspace_id = claimed_job
+        started_at = asyncio.get_running_loop().time()
+        logger.info(
+            "event=job_started process_role=worker workspace_id=%s job_id=%s job_type=%s",
+            workspace_id,
+            job_id,
+            job_type.value,
+        )
+        lease_renewal_task = asyncio.create_task(
+            _renew_active_job_lease(job_id),
+            name=f"job-lease-{job_id}",
+        )
         try:
             await process_job(job_id, job_type)
         except Exception as exc:
@@ -298,6 +363,34 @@ async def worker_loop() -> None:
                 job = db.get(AutomationJob, job_id)
                 if job and job.status not in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}:
                     mark_job_failed(db, job, message=str(exc), failure_class=JobFailureClass.PERMANENT)
+        finally:
+            lease_renewal_task.cancel()
+            await asyncio.gather(lease_renewal_task, return_exceptions=True)
+            completed_status = "unknown"
+            error_code = None
+            try:
+                with session_scope() as db:
+                    completed_job = db.get(AutomationJob, job_id)
+                    completed_status = completed_job.status.value if completed_job else "missing"
+                    error_code = (completed_job.result_json or {}).get("error_code") if completed_job else None
+            except Exception:
+                logger.exception("Could not read final job status job_id=%s", job_id)
+            terminal_event = {
+                JobStatus.SUCCEEDED.value: "job_succeeded",
+                JobStatus.FAILED.value: "job_failed",
+                JobStatus.CANCELLED.value: "job_cancelled",
+            }.get(completed_status, "job_finished")
+            logger.info(
+                "event=%s process_role=worker workspace_id=%s job_id=%s job_type=%s "
+                "result=%s error_code=%s duration_ms=%s",
+                terminal_event,
+                workspace_id,
+                job_id,
+                job_type.value,
+                completed_status,
+                error_code,
+                round((asyncio.get_running_loop().time() - started_at) * 1000),
+            )
 
 
 def main() -> None:

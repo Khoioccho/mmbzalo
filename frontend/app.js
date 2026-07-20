@@ -177,6 +177,7 @@
   function friendlyError(err, fallback = "Something went wrong. Please try again.") {
     const raw = (err && err.message ? err.message : String(err || "")).trim();
     if (!raw) return fallback;
+    if (err && err.payload && err.payload.error_code && raw) return raw;
     if (err && err.status === 401) return "Your session expired. Sign in again.";
     if (err && err.status === 403) return "You do not have permission to do that in this workspace.";
     if (err && err.status === 409) return "That action conflicts with something already running.";
@@ -627,13 +628,17 @@
       return null;
     }
     if (!res.ok) {
-      const message = (data && typeof data.detail === "string" && data.detail) || "Request failed.";
+      const message = (data && typeof data.message === "string" && data.message)
+        || (data && typeof data.detail === "string" && data.detail)
+        || "Request failed.";
       if (res.status === 401) {
         handleSignedOut("Your session expired. Sign in again.");
       }
       const error = new Error(message);
       error.status = res.status;
       error.payload = data;
+      error.errorCode = data && data.error_code;
+      error.retryable = Boolean(data && data.retryable);
       throw error;
     }
     return data;
@@ -828,8 +833,8 @@
     if (data.state === "authenticated") {
       text.textContent = "Zalo connected";
       detail.textContent = data.profile_name
-        ? `Signed in as ${data.profile_name}. Sync your contacts to start messaging.`
-        : (data.message || "Workspace session is ready.");
+        ? `Signed in as ${data.profile_name}. Keep one Zalo account per workspace to avoid session conflicts.`
+        : `${data.message || "Workspace session is ready."} Keep one Zalo account per workspace.`;
       icon.className = "login-state login-state--ok";
       setLoginBadge("Connected", "ok");
       btnStart.disabled = true;
@@ -1931,13 +1936,13 @@
     });
   }
 
-  async function startZaloConnection(buttonSelector, busyLabel) {
+  async function startZaloConnection(buttonSelector, busyLabel, replaceExisting = false) {
     if (!state.auth.authenticated) {
       setAuthMessage("Sign in first to start the workspace login browser.", "error");
       notify("warning", "Sign in required", "Sign in before connecting a Zalo session.");
       return;
     }
-    await withBusy(buttonSelector, busyLabel, async () => {
+    const started = await withBusy(buttonSelector, busyLabel, async () => {
       $("#btn-login-stop").disabled = false;
       $("#login-state-text").textContent = "Starting browser...";
       $("#login-state-detail").textContent = "Preparing the Zalo session, this can take a few seconds.";
@@ -1945,16 +1950,24 @@
       $("#login-preparing").style.display = "flex";
       log("Starting workspace login browser...");
       try {
+        if (replaceExisting) {
+          await apiRequest("/api/login/stop", { method: "POST" });
+        }
         const data = await apiRequest("/api/login/start", { method: "POST" });
         renderZaloLoginState(data);
         log("Zalo login started. Scan the QR code shown on this page.");
         startLoginPolling();
+        return true;
       } catch (err) {
         renderZaloLoginState({ state: "error", message: err.message });
         notify("error", "Could not start Zalo session", friendlyError(err), { key: "zalo-problem" });
         log(err.message, "error");
+        return false;
       }
     });
+    if (started && buttonSelector === "#btn-login-start") {
+      $(buttonSelector).disabled = true;
+    }
   }
 
   function bindLogin() {
@@ -1964,7 +1977,7 @@
 
     $("#btn-login-refresh-qr").addEventListener("click", () => {
       stopLoginPolling();
-      startZaloConnection("#btn-login-refresh-qr", "Refreshing...");
+      startZaloConnection("#btn-login-refresh-qr", "Refreshing...", true);
     });
 
     $("#btn-login-stop").addEventListener("click", async () => {
@@ -1979,6 +1992,7 @@
           notify("error", "Could not stop the session", friendlyError(err), { key: "zalo-problem" });
         }
       });
+      $("#btn-login-stop").disabled = state.zaloState === "idle" || state.zaloState === "signed_out";
     });
 
     $("#btn-login-sync-contacts").addEventListener("click", () => {

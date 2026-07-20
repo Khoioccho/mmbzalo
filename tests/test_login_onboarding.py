@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import tempfile
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from app.browser_lease import BrowserProfileInUseError, BrowserProfileLease
 from app.models import LoginState
-from app.zalo_driver import ZaloDriver
+from app.zalo_driver import ZaloDriver, _PlaywrightThread
 
 
 class FakeLease:
@@ -95,6 +96,29 @@ class LockedPlaywright:
         self.chromium = LockedChromium()
 
 
+class FakeSharedPlaywright:
+    def __init__(self) -> None:
+        self.stop_count = 0
+
+    def stop(self) -> None:
+        self.stop_count += 1
+
+
+class FakePlaywrightStarter:
+    def __init__(self, playwright: FakeSharedPlaywright, starts: list[int]) -> None:
+        self.playwright = playwright
+        self.starts = starts
+
+    def start(self) -> FakeSharedPlaywright:
+        self.starts.append(1)
+        return self.playwright
+
+
+class FailingPlaywrightStarter:
+    def start(self):
+        raise RuntimeError("driver transport failed")
+
+
 class LoginOnboardingTests(unittest.TestCase):
     def test_browser_profile_lease_is_exclusive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -159,6 +183,7 @@ class LoginOnboardingTests(unittest.TestCase):
                 host_identity="test-host",
                 login_display=":99",
             )
+            driver._ensure_pw = lambda: None
             driver._get_launch_proxy_config = lambda: None
 
             with patch("app.zalo_driver.PROFILE_LOCK_TIMEOUT_SECONDS", 0):
@@ -167,6 +192,50 @@ class LoginOnboardingTests(unittest.TestCase):
 
             lease = BrowserProfileLease.acquire(root, "workspace-a", "test-owner")
             lease.release()
+
+    def test_two_workspace_drivers_share_one_owner_runtime(self) -> None:
+        runtime = _PlaywrightThread()
+        shared_playwright = FakeSharedPlaywright()
+        starts: list[int] = []
+        driver_a = object.__new__(ZaloDriver)
+        driver_a.workspace_key = "workspace-a"
+        driver_a._pw = None
+        driver_b = object.__new__(ZaloDriver)
+        driver_b.workspace_key = "workspace-b"
+        driver_b._pw = None
+
+        async def scenario() -> None:
+            await asyncio.wrap_future(runtime.submit(driver_a._ensure_pw))
+            await asyncio.wrap_future(runtime.submit(driver_b._ensure_pw))
+            await asyncio.wrap_future(runtime.submit(runtime.stop_playwright_sync))
+
+        with patch("app.zalo_driver._playwright_thread", runtime), patch(
+            "app.zalo_driver.sync_playwright",
+            side_effect=lambda: FakePlaywrightStarter(shared_playwright, starts),
+        ):
+            asyncio.run(scenario())
+
+        self.assertIs(driver_a._pw, shared_playwright)
+        self.assertIs(driver_b._pw, shared_playwright)
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(shared_playwright.stop_count, 1)
+
+    def test_owner_runtime_recovers_after_initialization_failure(self) -> None:
+        runtime = _PlaywrightThread()
+        shared_playwright = FakeSharedPlaywright()
+        attempts = [FailingPlaywrightStarter(), FakePlaywrightStarter(shared_playwright, [])]
+
+        async def scenario() -> None:
+            with self.assertRaisesRegex(RuntimeError, "Browser service"):
+                await asyncio.wrap_future(runtime.submit(runtime.get_playwright_sync))
+            recovered = await asyncio.wrap_future(runtime.submit(runtime.get_playwright_sync))
+            self.assertIs(recovered, shared_playwright)
+            await asyncio.wrap_future(runtime.submit(runtime.stop_playwright_sync))
+
+        with patch("app.zalo_driver.sync_playwright", side_effect=lambda: attempts.pop(0)):
+            asyncio.run(scenario())
+
+        self.assertEqual(shared_playwright.stop_count, 1)
 
     def test_authenticated_login_closes_context_and_releases_lease(self) -> None:
         driver = object.__new__(ZaloDriver)
