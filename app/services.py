@@ -28,6 +28,7 @@ from app.api_models import (
     WorkspaceSummary,
     WorkspaceSwitchResult,
 )
+from app.browser_errors import JobAlreadyRunningError
 from app.config import Settings, get_settings
 from app.contact_name_utils import normalize_contact_name
 from app.crypto import decrypt_value, encrypt_value
@@ -640,6 +641,9 @@ def create_job(
     payload: dict[str, Any],
     idempotency_key: str | None = None,
 ) -> JobSubmissionResult:
+    # Serialize job submission per workspace so concurrent requests cannot both
+    # pass the active-job check before either inserts its queued row.
+    db.scalar(select(Workspace.id).where(Workspace.id == workspace_id).with_for_update())
     active_job = db.scalar(
         select(AutomationJob).where(
             AutomationJob.workspace_id == workspace_id,
@@ -647,7 +651,7 @@ def create_job(
         )
     )
     if active_job:
-        raise ValueError("This workspace already has an active automation job.")
+        raise JobAlreadyRunningError(str(active_job.id))
 
     job = AutomationJob(
         workspace_id=workspace_id,
@@ -1016,6 +1020,7 @@ def heartbeat_worker(db: Session, settings: Settings | None = None) -> WorkerNod
 def claim_next_job(db: Session, settings: Settings | None = None) -> AutomationJob | None:
     cfg = settings or get_settings()
     heartbeat_worker(db, cfg)
+    fail_expired_job_leases(db)
     stmt = (
         select(AutomationJob)
         .where(
@@ -1036,6 +1041,37 @@ def claim_next_job(db: Session, settings: Settings | None = None) -> AutomationJ
     create_job_event(db, job, event_type="leased", message=f"Job leased by {cfg.host_identity}.")
     db.flush()
     return job
+
+
+def fail_expired_job_leases(db: Session) -> int:
+    expired_jobs = list(
+        db.scalars(
+            select(AutomationJob)
+            .where(
+                AutomationJob.status.in_([JobStatus.LEASED, JobStatus.RUNNING]),
+                AutomationJob.lease_expires_at.is_not(None),
+                AutomationJob.lease_expires_at < now_utc(),
+            )
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for job in expired_jobs:
+        if job.type == JobType.CAMPAIGN_SEND:
+            campaign = db.scalar(select(Campaign).where(Campaign.last_job_id == job.id))
+            if campaign is not None:
+                campaign.status = CampaignStatus.FAILED
+        mark_job_failed(
+            db,
+            job,
+            message="The worker stopped before this browser job completed. Retry the operation.",
+            failure_class=JobFailureClass.TRANSIENT,
+            result={
+                "message": "The worker stopped before this browser job completed. Retry the operation.",
+                "error_code": "WORKER_LEASE_EXPIRED",
+                "retryable": True,
+            },
+        )
+    return len(expired_jobs)
 
 
 def mark_job_running(db: Session, job: AutomationJob) -> None:
