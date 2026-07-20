@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=20260614-auth-jobs-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260719-ui-polish-1" />
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -85,6 +85,34 @@
                 <p class="card__desc">Sign in to the dashboard, choose a workspace, then manage the workspace Zalo browser session for automation tasks.</p>
               </div>
               <div class="card__body">
+                <ol class="onboarding" id="onboarding-steps">
+                  <li class="onboard-step" data-step="account">
+                    <span class="onboard-step__marker">1</span>
+                    <span class="onboard-step__title">Account</span>
+                    <span class="onboard-step__sub" id="onboard-account-sub">Sign in or sign up</span>
+                  </li>
+                  <li class="onboard-step" data-step="workspace">
+                    <span class="onboard-step__marker">2</span>
+                    <span class="onboard-step__title">Workspace</span>
+                    <span class="onboard-step__sub" id="onboard-workspace-sub">Pick a workspace</span>
+                  </li>
+                  <li class="onboard-step" data-step="zalo">
+                    <span class="onboard-step__marker">3</span>
+                    <span class="onboard-step__title">Zalo</span>
+                    <span class="onboard-step__sub" id="onboard-zalo-sub">Scan the QR code</span>
+                  </li>
+                  <li class="onboard-step" data-step="contacts">
+                    <span class="onboard-step__marker">4</span>
+                    <span class="onboard-step__title">Contacts</span>
+                    <span class="onboard-step__sub" id="onboard-contacts-sub">Sync your contact list</span>
+                  </li>
+                  <li class="onboard-step" data-step="ready">
+                    <span class="onboard-step__marker">5</span>
+                    <span class="onboard-step__title">Ready</span>
+                    <span class="onboard-step__sub" id="onboard-ready-sub">Start messaging</span>
+                  </li>
+                </ol>
+
                 <div class="auth-panel" id="auth-panel">
                   <div class="auth-panel__form" id="auth-form-panel">
                     <div class="auth-mode" role="tablist" aria-label="Account access mode">
@@ -150,7 +178,8 @@
                   <h3>Workspace Zalo Session</h3>
                   <p>Connect the currently selected workspace by scanning the QR code here.</p>
                 </div>
-                <div class="login-status-card" id="login-status-card">
+                <div class="login-status-card" id="login-status-card" data-state="idle">
+                  <span class="status-badge" id="login-status-badge">Not connected</span>
                   <div class="login-state" id="login-state-icon">
                     <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="24" cy="24" r="20"/><path d="M24 14v10l7 7" stroke-linecap="round"/></svg>
                   </div>
@@ -158,21 +187,58 @@
                   <p class="login-state-detail" id="login-state-detail">Click "Connect Zalo" to begin.</p>
                   <div class="login-qr" id="login-qr" style="display:none;">
                     <img id="login-qr-image" alt="Zalo login QR code" />
-                    <p>Open Zalo on your phone, scan this code, then approve the login.</p>
+                    <ol class="login-qr__steps">
+                      <li>Open Zalo on your phone.</li>
+                      <li>Tap the QR scanner and scan this code.</li>
+                      <li>Approve the login request on your phone.</li>
+                    </ol>
+                  </div>
+                  <div class="login-preparing" id="login-preparing" style="display:none;">
+                    <span class="spinner-inline"></span>
+                    <span>Preparing QR code...</span>
                   </div>
                 </div>
-                <div class="actions">
+                <div class="actions" id="zalo-actions">
                   <button class="btn btn--primary" id="btn-login-start">
                     <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM9.555 7.168A1 1 0 0 0 8 8v4a1 1 0 0 0 1.555.832l3-2a1 1 0 0 0 0-1.664l-3-2z" clip-rule="evenodd"/></svg>
                     Connect Zalo
+                  </button>
+                  <button class="btn btn--secondary" id="btn-login-refresh-qr" type="button" style="display:none;">
+                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" clip-rule="evenodd"/></svg>
+                    Refresh QR
                   </button>
                   <button class="btn btn--secondary" id="btn-login-stop" disabled>
                     <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM8 7a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1H8z" clip-rule="evenodd"/></svg>
                     Stop
                   </button>
-                  <button class="btn btn--primary" id="btn-login-sync-contacts" style="display:none;">
-                    Sync Contacts
-                  </button>
+                </div>
+
+                <div class="sync-card" id="account-sync-card" style="display:none;">
+                  <div class="sync-card__head">
+                    <div>
+                      <h4 class="sync-card__title">Contact Sync</h4>
+                      <p class="sync-card__desc">Import your Zalo friend list so you can pick recipients by name.</p>
+                    </div>
+                    <span class="status-badge" id="account-sync-badge">Never synced</span>
+                  </div>
+                  <div class="sync-card__stats">
+                    <div class="sync-card__stat">
+                      <span class="sync-card__stat-label">Stored contacts</span>
+                      <span class="sync-card__stat-value" id="account-sync-count">0</span>
+                    </div>
+                    <div class="sync-card__stat">
+                      <span class="sync-card__stat-label">Last sync</span>
+                      <span class="sync-card__stat-value" id="account-sync-time">Never</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="btn btn--primary" id="btn-login-sync-contacts" type="button">
+                      Sync Contacts
+                    </button>
+                    <button class="btn btn--secondary btn--sm" id="btn-account-view-contacts" type="button">
+                      View Contacts
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -194,7 +260,7 @@
                 </div>
 
                 <div id="message-manual-mode">
-                  <label class="field-label" for="msg-targets">Target List</label>
+                  <label class="field-label field-label--first" for="msg-targets">Target List</label>
                   <textarea id="msg-targets" class="field-textarea" rows="4" placeholder="Enter phone numbers or names, one per line&#10;0912345678&#10;0987654321&#10;Nguyá»…n VÄƒn A" spellcheck="false"></textarea>
                   <p class="field-hint">One phone number or contact name per line.</p>
                   <div class="manual-picker-actions">
@@ -207,84 +273,71 @@
                       Clear Target List
                     </button>
                   </div>
+
+                  <label class="field-label" for="msg-content">Message</label>
+                  <textarea id="msg-content" class="field-textarea" rows="4" placeholder="Type your message here..."></textarea>
+
+                  <div class="field-row">
+                    <div class="field-group">
+                      <label class="field-label" for="msg-delay-min">Min Delay (s)</label>
+                      <input type="number" id="msg-delay-min" class="field-input" value="15" min="1" max="120" />
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="msg-delay-max">Max Delay (s)</label>
+                      <input type="number" id="msg-delay-max" class="field-input" value="30" min="1" max="120" />
+                    </div>
+                  </div>
+
+                  <div class="actions" id="manual-message-actions">
+                    <button class="btn btn--primary" id="btn-msg-send">
+                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
+                      Send Messages
+                    </button>
+                  </div>
                 </div>
 
                 <div class="campaign-builder" id="message-campaign-mode" style="display:none;">
+                  <div class="field-group">
+                    <label class="field-label field-label--first" for="campaign-name">Campaign Name</label>
+                    <input type="text" id="campaign-name" class="field-input" placeholder="April follow-up" />
+                    <p class="field-error" id="campaign-name-error" style="display:none;"></p>
+                  </div>
+
+                  <div class="campaign-selection" id="campaign-selection">
+                    <div class="campaign-selection__head">
+                      <div>
+                        <span class="campaign-selection__title">Recipients</span>
+                        <span class="campaign-selection__count" id="campaign-selected-count">None selected</span>
+                      </div>
+                      <div class="campaign-selection__actions">
+                        <button class="btn btn--secondary btn--sm" id="btn-campaign-open-contact-picker" type="button">
+                          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 2a1 1 0 0 0 0 2h2a1 1 0 1 0 0-2h-2z"/><path fill-rule="evenodd" d="M5 5a2 2 0 0 1 2-2 3 3 0 0 0 3 3h2a3 3 0 0 0 3-3 2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5zm3 3a1 1 0 0 0 0 2h5a1 1 0 1 0 0-2H8zm0 4a1 1 0 1 0 0 2h5a1 1 0 1 0 0-2H8z" clip-rule="evenodd"/></svg>
+                          <span id="btn-campaign-picker-label">Choose From Contacts</span>
+                        </button>
+                        <button class="btn btn--secondary btn--sm" id="btn-campaign-clear-selection" type="button" style="display:none;">Clear</button>
+                      </div>
+                    </div>
+                    <div class="campaign-selection__summary" id="campaign-selection-summary" style="display:none;"></div>
+                    <p class="field-error" id="campaign-recipients-error" style="display:none;"></p>
+                  </div>
+
+                  <label class="field-label" for="campaign-message">Message</label>
+                  <textarea id="campaign-message" class="field-textarea" rows="4" placeholder="Type the campaign message here..."></textarea>
+                  <p class="field-error" id="campaign-message-error" style="display:none;"></p>
+
                   <div class="field-row">
                     <div class="field-group">
-                      <label class="field-label" for="campaign-name">Campaign Name</label>
-                      <input type="text" id="campaign-name" class="field-input" placeholder="April follow-up" />
-                    </div>
-                    <div class="field-group">
-                      <label class="field-label" for="campaign-search">Search Contacts</label>
-                      <input type="text" id="campaign-search" class="field-input" placeholder="Search by name" />
-                    </div>
-                  </div>
-                  <div class="field-row">
-                    <div class="field-group">
-                      <label class="field-label" for="campaign-identity-source">Identity Strength</label>
-                      <select id="campaign-identity-source" class="field-input">
-                        <option value="all">All contacts</option>
-                        <option value="zid">Strong identity only</option>
-                        <option value="name_avatar">Fallback identity only</option>
-                      </select>
-                    </div>
-                    <div class="field-group">
-                      <label class="field-label" for="campaign-sort-by">Sort By</label>
-                      <select id="campaign-sort-by" class="field-input">
-                        <option value="name">Name</option>
-                        <option value="last_seen_at">Last seen</option>
-                      </select>
-                    </div>
-                    <div class="field-group">
-                      <label class="field-label" for="campaign-sort-order">Order</label>
-                      <select id="campaign-sort-order" class="field-input">
-                        <option value="asc">Ascending</option>
-                        <option value="desc">Descending</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="campaign-check">
-                    <label class="checkbox-row">
-                      <input type="checkbox" id="campaign-unread-only" />
-                      <span>Unread contacts only</span>
-                    </label>
-                  </div>
-                  <div class="field-row">
-                    <div class="field-group">
-                      <label class="field-label" for="campaign-delay-min">Campaign Min Delay (s)</label>
+                      <label class="field-label" for="campaign-delay-min">Min Delay (s)</label>
                       <input type="number" id="campaign-delay-min" class="field-input" value="1" min="0" max="120" />
                     </div>
                     <div class="field-group">
-                      <label class="field-label" for="campaign-delay-max">Campaign Max Delay (s)</label>
+                      <label class="field-label" for="campaign-delay-max">Max Delay (s)</label>
                       <input type="number" id="campaign-delay-max" class="field-input" value="3" min="0" max="120" />
                     </div>
                   </div>
-                  <div class="campaign-selection">
-                    <div class="campaign-preview__header">
-                      <span class="campaign-preview__title">Selected Recipients</span>
-                      <span class="campaign-preview__count" id="campaign-selected-count">0 selected</span>
-                    </div>
-                    <div class="campaign-selection__actions">
-                      <button class="btn btn--secondary btn--sm" id="btn-campaign-open-contact-picker" type="button">
-                        <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 2a1 1 0 0 0 0 2h2a1 1 0 1 0 0-2h-2z"/><path fill-rule="evenodd" d="M5 5a2 2 0 0 1 2-2 3 3 0 0 0 3 3h2a3 3 0 0 0 3-3 2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5zm3 3a1 1 0 0 0 0 2h5a1 1 0 1 0 0-2H8zm0 4a1 1 0 1 0 0 2h5a1 1 0 1 0 0-2H8z" clip-rule="evenodd"/></svg>
-                        Choose From Contacts
-                      </button>
-                      <button class="btn btn--secondary btn--sm" id="btn-campaign-clear-selection" type="button">Clear Selected</button>
-                    </div>
-                    <div class="campaign-selection__list" id="campaign-selection-list">
-                      <p class="field-hint">No campaign recipients selected yet. Preview matches, then add the contacts you want.</p>
-                    </div>
-                  </div>
-                  <div class="actions">
-                    <button class="btn btn--secondary" id="btn-campaign-preview">
-                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10 3C5 3 1.73 7.11.46 9.11a1.59 1.59 0 0 0 0 1.78C1.73 12.89 5 17 10 17s8.27-4.11 9.54-6.11a1.59 1.59 0 0 0 0-1.78C18.27 7.11 15 3 10 3zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg>
-                      Preview Matches
-                    </button>
-                    <button class="btn btn--secondary" id="btn-campaign-add-all" type="button">
-                      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm3.707-9.707a1 1 0 0 0-1.414-1.414L9 10.172 7.707 8.879a1 1 0 0 0-1.414 1.414l2 2a1 1 0 0 0 1.414 0l4-4z" clip-rule="evenodd"/></svg>
-                      Add All Matches
-                    </button>
+                  <p class="field-hint">Delay applied between each send, to keep the pace human.</p>
+
+                  <div class="actions actions--campaign">
                     <button class="btn btn--secondary" id="btn-campaign-save">
                       <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.414A2 2 0 0 0 17.414 6L14 2.586A2 2 0 0 0 12.586 2H4zm6 1v4H6V4h4z"/></svg>
                       Save Campaign
@@ -294,20 +347,53 @@
                       Save + Execute
                     </button>
                   </div>
+
                   <div class="campaign-progress" id="campaign-progress" style="display:none;">
-                    <div class="campaign-preview__header">
-                      <span class="campaign-preview__title">Campaign Progress</span>
-                      <span class="campaign-preview__count" id="campaign-progress-count"></span>
+                    <div class="progress-summary">
+                      <div class="progress-summary__head">
+                        <span class="progress-summary__title">Campaign Progress</span>
+                        <span class="status-badge status-badge--running" id="campaign-progress-status">Running</span>
+                      </div>
+                      <div class="progress-bar">
+                        <div class="progress-bar__fill" id="campaign-progress-bar" style="width:0%"></div>
+                      </div>
+                      <div class="progress-summary__stats">
+                        <div class="progress-stat">
+                          <span class="progress-stat__label">Progress</span>
+                          <span class="progress-stat__value" id="campaign-stat-progress">0/0</span>
+                        </div>
+                        <div class="progress-stat">
+                          <span class="progress-stat__label">Sent</span>
+                          <span class="progress-stat__value progress-stat__value--ok" id="campaign-stat-sent">0</span>
+                        </div>
+                        <div class="progress-stat">
+                          <span class="progress-stat__label">Failed</span>
+                          <span class="progress-stat__value" id="campaign-stat-failed">0</span>
+                        </div>
+                        <div class="progress-stat">
+                          <span class="progress-stat__label">Duration</span>
+                          <span class="progress-stat__value" id="campaign-stat-duration">0s</span>
+                        </div>
+                      </div>
                     </div>
-                    <div class="campaign-progress__list" id="campaign-progress-list"></div>
-                  </div>
-                  <div class="campaign-preview" id="campaign-preview" style="display:none;">
-                    <div class="campaign-preview__header">
-                      <span class="campaign-preview__title">Campaign Matches</span>
-                      <span class="campaign-preview__count" id="campaign-preview-count"></span>
+
+                    <div class="event-log">
+                      <div class="event-log__head">
+                        <span class="event-log__title">Activity</span>
+                        <button class="btn btn--secondary btn--sm" id="btn-campaign-toggle-events" type="button">View all activity</button>
+                      </div>
+                      <div class="campaign-progress__list" id="campaign-progress-list"></div>
                     </div>
-                    <div class="campaign-preview__list" id="campaign-preview-list"></div>
+
+                    <div class="campaign-results" id="campaign-results" style="display:none;">
+                      <div class="event-log__head">
+                        <span class="event-log__title">Results</span>
+                        <span class="campaign-preview__count" id="campaign-results-count"></span>
+                      </div>
+                      <div class="campaign-results__list" id="campaign-results-list"></div>
+                    </div>
                   </div>
+
                   <div class="campaign-history">
                     <div class="campaign-preview__header">
                       <span class="campaign-preview__title">Recent Campaigns</span>
@@ -317,27 +403,6 @@
                       <p class="field-hint">No campaigns yet.</p>
                     </div>
                   </div>
-                </div>
-
-                <label class="field-label" for="msg-content">Message</label>
-                <textarea id="msg-content" class="field-textarea" rows="4" placeholder="Type your message here..."></textarea>
-
-                <div class="field-row">
-                  <div class="field-group">
-                    <label class="field-label" for="msg-delay-min">Min Delay (s)</label>
-                    <input type="number" id="msg-delay-min" class="field-input" value="15" min="1" max="120" />
-                  </div>
-                  <div class="field-group">
-                    <label class="field-label" for="msg-delay-max">Max Delay (s)</label>
-                    <input type="number" id="msg-delay-max" class="field-input" value="30" min="1" max="120" />
-                  </div>
-                </div>
-
-                <div class="actions" id="manual-message-actions">
-                  <button class="btn btn--primary" id="btn-msg-send">
-                    <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path d="M10.894 2.553a1 1 0 0 0-1.788 0l-7 14a1 1 0 0 0 1.169 1.409l5-1.429A1 1 0 0 0 9 15.571V11a1 1 0 1 1 2 0v4.571a1 1 0 0 0 .725.962l5 1.428a1 1 0 0 0 1.17-1.408l-7-14z"/></svg>
-                    Send Messages
-                  </button>
                 </div>
 
                 <div class="task-result" id="msg-result" style="display:none;"></div>
@@ -555,9 +620,15 @@
             </h2>
           </div>
           <div class="card__body">
-            <div class="activity-log" id="activity-log">
+            <div class="activity-log activity-log--events" id="event-log">
               <p class="log-empty">No activity yet.</p>
             </div>
+            <details class="tech-details">
+              <summary class="tech-details__summary">Technical details</summary>
+              <div class="activity-log" id="activity-log">
+                <p class="log-empty">No technical output yet.</p>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -581,14 +652,65 @@
         </button>
       </div>
       <div class="picker-modal__body">
-        <label class="field-label" for="contact-picker-search">Search Stored Contacts</label>
+        <label class="field-label field-label--first" for="contact-picker-search">Search Stored Contacts</label>
         <input type="text" id="contact-picker-search" class="field-input" placeholder="Type a contact name" autocomplete="off" />
-        <div class="picker-modal__status" id="contact-picker-status">Open the picker to load stored contacts.</div>
+
+        <details class="picker-filters" id="picker-filters">
+          <summary class="tech-details__summary">Filters</summary>
+          <div class="picker-filters__body">
+            <div class="field-row">
+              <div class="field-group">
+                <label class="field-label field-label--first" for="campaign-identity-source">Identity Strength</label>
+                <select id="campaign-identity-source" class="field-input">
+                  <option value="all">All contacts</option>
+                  <option value="zid">Strong identity only</option>
+                  <option value="name_avatar">Fallback identity only</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="field-label field-label--first" for="campaign-sort-by">Sort By</label>
+                <select id="campaign-sort-by" class="field-input">
+                  <option value="name">Name</option>
+                  <option value="last_seen_at">Last seen</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="field-label field-label--first" for="campaign-sort-order">Order</label>
+                <select id="campaign-sort-order" class="field-input">
+                  <option value="asc">Ascending</option>
+                  <option value="desc">Descending</option>
+                </select>
+              </div>
+            </div>
+            <label class="checkbox-row picker-filters__check">
+              <input type="checkbox" id="campaign-unread-only" />
+              <span>Unread contacts only</span>
+            </label>
+          </div>
+        </details>
+
+        <div class="picker-modal__toolbar">
+          <div class="picker-modal__status" id="contact-picker-status">Open the picker to load stored contacts.</div>
+          <div class="picker-modal__bulk">
+            <button class="btn btn--secondary btn--sm" id="btn-picker-select-all" type="button">Select all visible</button>
+            <button class="btn btn--secondary btn--sm" id="btn-picker-clear" type="button">Clear selection</button>
+          </div>
+        </div>
+
         <div class="picker-modal__list" id="contact-picker-list"></div>
+      </div>
+      <div class="picker-modal__footer">
+        <span class="picker-modal__selected" id="contact-picker-selected">0 selected</span>
+        <div class="picker-modal__footer-actions">
+          <button class="btn btn--secondary" id="btn-picker-cancel" type="button">Cancel</button>
+          <button class="btn btn--primary" id="btn-picker-confirm" type="button">Confirm selection</button>
+        </div>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260614-auth-jobs-1"></script>
+  <div class="toast-root" id="toast-root" role="status" aria-live="polite"></div>
+
+  <script src="/static/app.js?v=20260719-ui-polish-1"></script>
 </body>
 </html>
